@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     search_endpoint: str = ""
     search_index: str = "design-pages"
 
-    # Tests only: send every call to this OpenAI-compatible base URL (the fake model).
+    # Tests only: send every call to this OpenAI-compatible base URL (offline tests).
     llm_base_url_override: str = ""
 
     # Retry policy (pipeline mode). PLACEHOLDER defaults until the customer's real settings are known.
