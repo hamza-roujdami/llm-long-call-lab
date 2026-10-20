@@ -1,0 +1,25 @@
+# Secrets and local config
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+infra/*.local.bicepparam
+infra/*.parameters.local.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+
+# Local run output (curated results are committed under results/ explicitly)
+results/*.local.csv
+results/scratch/
+
+# OS / editor
+.DS_Store
+.idea/

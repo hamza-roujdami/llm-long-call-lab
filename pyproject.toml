@@ -1,0 +1,23 @@
+[project]
+name = "apim-timeout-lab"
+version = "0.1.0"
+description = "Lab to measure long-call behaviour on ACA Job -> APIM -> model"
+requires-python = ">=3.13"
+dependencies = []
+
+[project.optional-dependencies]
+mock = ["fastapi>=0.115", "uvicorn>=0.32", "pydantic-settings>=2.6"]
+client = ["httpx>=0.28", "pydantic-settings>=2.6"]
+openai = ["openai>=1.50"]
+dev = ["pytest>=8", "ruff>=0.8", "fastapi>=0.115", "uvicorn>=0.32", "httpx>=0.28", "pydantic-settings>=2.6"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
