@@ -238,6 +238,7 @@ def test_pipeline_end_to_end(stream, tmp_path):
     sections = store.outputs["r1"]["rounds"][0]["sections"]
     assert set(sections) == {"cover", "network", "addressing", "compute"}
     assert all("parse_error" not in s for s in sections.values())
+    assert "plan" in store.outputs["r1"]["rounds"][0]
 
 
 def test_failed_run_is_recorded(tmp_path):
@@ -257,3 +258,12 @@ def test_failed_run_is_recorded(tmp_path):
     run(go())
     assert store.runs["r1"]["status"] == "failed" and store.runs["r1"]["error"]
     assert any(c["http_status"] == 500 for c in store.calls["r1"])
+
+
+def test_orchestration_is_a_maf_workflow():
+    """planner -> fan-out -> four section executors -> fan-in -> assemble."""
+    from worker.orchestrator import Deps, build_workflow
+
+    d = Deps("r", RunConfig(agents=["network", "compute"]), [], None, None, None, MemoryStore(), 3)
+    ids = {e.id for e in build_workflow(d).executors.values()}
+    assert ids == {"planner", "network", "compute", "assemble"}

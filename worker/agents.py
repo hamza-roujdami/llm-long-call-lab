@@ -70,7 +70,7 @@ def parse_json(text: str) -> dict[str, Any]:
 def build_agent(
     client: Any,
     name: str,
-    instructions: str,
+    instructions: str | None,
     *,
     tools: list[Any] | None = None,
     reasoning_effort: str = "high",

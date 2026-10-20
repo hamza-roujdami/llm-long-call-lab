@@ -35,8 +35,8 @@ flowchart TD
     UI["Web UI (Container App)<br/>start run, poll status"]
     API["API (FastAPI, Container App)<br/>POST /runs, GET /runs/id"]
     JOB["Worker (Container Apps Job)<br/>no ingress"]
-    ORCH["Orchestrator<br/>Microsoft Agent Framework:<br/>planner + 4 section agents"]
-    MX["run_matrix.py<br/>calibrate S and L, then<br/>3 paths x stream off/on x S/L"]
+    ORCH["Orchestrator<br/>MAF workflow: planner, then<br/>4 section agents in parallel"]
+    MX["run_matrix.py (MAF agent)<br/>calibrate S and L, then<br/>3 paths x stream off/on x S/L"]
     TOOL["ai_search tool<br/>AI Search over synthetic doc"]
     LLM["llm_client.py<br/>path: direct or apim<br/>stream: on or off<br/>timers and logs"]
     APIM2["APIM path 2<br/>default forward-request"]
@@ -67,7 +67,8 @@ flowchart TD
 Yellow = under test. APIM calls Foundry with its managed identity; paths 2 and 3 differ only in the `forward-request` policy ([apim/](apim)).
 
 ```
-web/ api/ worker/   UI, API, and the Job (Agent Framework pipeline + run_matrix.py; llm_client.py times every call)
+web/ api/ worker/   UI, API, and the Job: a Microsoft Agent Framework (MAF) workflow and the matrix, both on MAF agents;
+                    llm_client.py times every HTTP call underneath
 infra/ apim/        Bicep and the two APIM policies
 data/ results/      synthetic design-document generator; CSVs
 ```

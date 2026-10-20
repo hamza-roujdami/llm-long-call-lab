@@ -4,7 +4,7 @@
   HTTP transport times every call at the wire level: time to response headers, time to first body
   byte, time to first token, longest silent gap between chunks, total time, HTTP status, request IDs
   and token usage. One record per HTTP attempt, whatever sits on top (plain call or an agent loop).
-* `call_model()` is the plain one-shot call used by the matrix.
+* `call_model()` is the one-shot call used by the matrix: a Microsoft Agent Framework `Agent` with no tools.
 * `Model.agent_client()` hands the same instrumented client to Microsoft Agent Framework.
 
 SDK retries are disabled. Retries (only when LLM_MAX_ATTEMPTS > 1) happen in the transport, before
@@ -295,6 +295,7 @@ class Model:
     ) -> None:
         self.st, self.path, self.run_id = st, path, run_id
         self._credential = None
+        self._maf_client = None
         headers: dict[str, str] = {}
         api_key: Any = "unused"
         if st.llm_base_url_override:
@@ -333,7 +334,9 @@ class Model:
         """Microsoft Agent Framework chat client (Responses API) over the instrumented HTTP client."""
         from agent_framework.openai import OpenAIChatClient
 
-        return OpenAIChatClient(model=self.st.model, async_client=self.client)
+        if self._maf_client is None:
+            self._maf_client = OpenAIChatClient(model=self.st.model, async_client=self.client)
+        return self._maf_client
 
     async def call(
         self,
@@ -346,39 +349,36 @@ class Model:
         label: str = "",
         agent: str = "call_model",
     ) -> CallResult:
-        """One model call. Never raises: failures are data and come back in the result."""
-        items: list[dict[str, Any]] = []
-        if system:
-            items.append({"role": "developer", "content": system})
-        items.append({"role": "user", "content": prompt})
-        kwargs: dict[str, Any] = {
-            "model": self.st.model,
-            "input": items,
-            "max_output_tokens": max_output_tokens,
-            "store": False,
-        }
-        if reasoning_effort and reasoning_effort != "none":
-            kwargs["reasoning"] = {"effort": reasoning_effort}
-        text: list[str] = []
+        """One model call through a Microsoft Agent Framework `Agent` (no tools, one HTTP request).
+
+        Never raises: failures are data and come back in the result.
+        """
+        from worker.agents import build_agent  # lazy: agents imports this module
+
+        text = ""
         error = ""
         with call_context(
             run_id=self.run_id, label=label, agent=agent, path=self.path, stream=stream
         ) as ctx:
             try:
+                maf_agent = build_agent(
+                    self.agent_client(),
+                    agent,
+                    system,
+                    reasoning_effort=reasoning_effort,
+                    max_output_tokens=max_output_tokens,
+                )
                 if stream:
-                    events = await self.client.responses.create(**kwargs, stream=True)
-                    async for ev in events:
-                        if ev.type == "response.output_text.delta":
-                            text.append(ev.delta)
-                        elif ev.type in ("response.failed", "response.incomplete", "error"):
-                            raise RuntimeError(f"stream ended with {ev.type}")
+                    updates = maf_agent.run(prompt, stream=True)
+                    async for _ in updates:
+                        pass
+                    text = (await updates.get_final_response()).text
                 else:
-                    resp = await self.client.responses.create(**kwargs)
-                    text.append(resp.output_text)
+                    text = (await maf_agent.run(prompt)).text
             except Exception as e:  # noqa: BLE001
                 error = f"{type(e).__name__}: {e}"[:300]
         rec = ctx.records[-1] if ctx.records else {"outcome": "error", "error_detail": error}
-        return CallResult("".join(text), rec, error)
+        return CallResult(text, rec, error)
 
     async def aclose(self) -> None:
         await self.client.close()
