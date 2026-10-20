@@ -1,0 +1,24 @@
+<!--
+  Variant B (buffering ON): identical to streaming.xml except buffer-response="true"
+  (the documented default). Learn: chunks are buffered (8 KB, unless end of stream is detected)
+  before being returned to the caller.
+  https://learn.microsoft.com/azure/api-management/forward-request-policy
+  Same explicit timeout, same absence of validate-content / caching / body logging.
+-->
+<policies>
+  <inbound>
+    <base />
+    <set-header name="x-mock-key" exists-action="override">
+      <value>{{mock-key}}</value>
+    </set-header>
+  </inbound>
+  <backend>
+    <forward-request timeout="600" buffer-response="true" fail-on-error-status-code="false" />
+  </backend>
+  <outbound>
+    <base />
+  </outbound>
+  <on-error>
+    <base />
+  </on-error>
+</policies>
