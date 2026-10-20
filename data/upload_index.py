@@ -1,4 +1,4 @@
-"""Create the `design-pages` index in Azure AI Search and upload the synthetic pages.
+"""Create the `design-pages` index in Azure AI Search and upload the (generated) synthetic pages.
 
   python data/upload_index.py --search-name <name> --resource-group <rg> [--subscription <id>]
 
@@ -7,15 +7,13 @@ the index with managed identity (Search Index Data Reader).
 """
 
 import argparse
-import json
 import subprocess
-from pathlib import Path
 
 import httpx
+from generate_synthetic_docs import generate
 
 API = "2024-07-01"
 INDEX = "design-pages"
-PAGES = Path(__file__).parent / "synthetic_docs" / "pages.jsonl"
 
 INDEX_DEF = {
     "name": INDEX,
@@ -70,7 +68,7 @@ def main() -> None:
 
     base = f"https://{args.search_name}.search.windows.net"
     headers = {"api-key": admin_key(args.search_name, args.resource_group, args.subscription)}
-    docs = [json.loads(line) for line in PAGES.read_text().splitlines() if line.strip()]
+    _, docs, _ = generate(pages=180, seed=42)  # same synthetic document the worker image generates
     with httpx.Client(headers=headers, timeout=60) as http:
         r = http.put(f"{base}/indexes/{INDEX}?api-version={API}", json=INDEX_DEF)
         r.raise_for_status()

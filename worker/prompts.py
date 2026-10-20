@@ -2,11 +2,10 @@
 
 S and L are the same task at two sizes: review N synthetic facts and write one verdict per fact, which
 makes the answer (and therefore the call) long. N is calibrated against the real model so S takes about
-300 s and L about 450 s on the direct path; the numbers live in calibration.json.
+300 s and L about 450 s on the direct path; the result is saved to results/calibration.json by run_matrix.py.
 """
 
 import json
-from pathlib import Path
 from typing import Any
 
 SYSTEM = (
@@ -18,7 +17,6 @@ SYSTEM = (
     "fact ids. Never abbreviate, never use ellipses, never write 'etc.'; an answer with fewer entries "
     "than fact_count is invalid."
 )
-CALIBRATION_FILE = Path(__file__).parent / "calibration.json"
 TARGETS_S = {"S": 300, "L": 450}
 
 
@@ -27,9 +25,3 @@ def build_prompt(n_facts: int, facts: list[dict[str, Any]]) -> tuple[str, str]:
     picked = facts[:n_facts]
     user = json.dumps({"fact_count": len(picked), "facts": picked})
     return SYSTEM, user
-
-
-def load_calibration() -> dict[str, Any]:
-    if CALIBRATION_FILE.exists():
-        return json.loads(CALIBRATION_FILE.read_text())
-    return {}

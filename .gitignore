@@ -36,3 +36,4 @@ cx-docs/
 
 # Generated, human-readable copy of the synthetic document (not used at runtime)
 data/synthetic_docs/design_document.md
+data/synthetic_docs/

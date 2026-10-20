@@ -8,14 +8,78 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any, Literal
 
+import httpx
 from fastapi import Body, Depends, FastAPI, Header, HTTPException
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
-from api import jobs
-from api.store import MemoryStore
-
 app = FastAPI(title="apim-timeout-lab api")
+
+ARM = "https://management.azure.com"
+ARM_API_VERSION = "2024-03-01"
+
+
+class MemoryStore:
+    def __init__(self) -> None:
+        self.runs: dict[str, dict[str, Any]] = {}
+        self.calls: dict[str, list[dict[str, Any]]] = {}
+        self.outputs: dict[str, dict[str, Any]] = {}
+
+    async def create_run(self, run_id, fields):
+        self.runs[run_id] = {"id": run_id, **fields}
+
+    async def update_run(self, run_id, **fields):
+        self.runs.setdefault(run_id, {"id": run_id}).update(fields)
+
+    async def add_call(self, run_id, rec):
+        self.calls.setdefault(run_id, []).append(rec)
+
+    async def put_output(self, run_id, data):
+        self.outputs[run_id] = data
+
+    async def get_run(self, run_id):
+        return self.runs.get(run_id)
+
+    async def list_runs(self, limit=25):
+        return sorted(self.runs.values(), key=lambda r: r.get("created_utc", ""), reverse=True)[
+            :limit
+        ]
+
+    async def list_calls(self, run_id):
+        return self.calls.get(run_id, [])
+
+    async def get_output(self, run_id):
+        return self.outputs.get(run_id)
+
+
+async def start_job(credential, run_id: str) -> str:
+    """Start the worker as a Container Apps Job execution through ARM."""
+    job_id = os.environ["JOB_RESOURCE_ID"]
+    # An execution override replaces the container definition, so the full env is passed each time.
+    env = json.loads(os.environ.get("WORKER_ENV_JSON", "[]")) + [
+        {"name": "RUN_ID", "value": run_id}
+    ]
+    body = {
+        "containers": [
+            {
+                "name": os.environ.get("WORKER_CONTAINER", "worker"),
+                "image": os.environ["WORKER_IMAGE"],
+                "env": env,
+                "resources": {"cpu": 1.0, "memory": "2Gi"},
+            }
+        ]
+    }
+    token = (await credential.get_token(f"{ARM}/.default")).token
+    async with httpx.AsyncClient(timeout=60) as http:
+        r = await http.post(
+            f"{ARM}{job_id}/start?api-version={ARM_API_VERSION}",
+            json=body,
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    if r.status_code >= 300:
+        raise RuntimeError(f"job start failed: {r.status_code} {r.text[:300]}")
+    return (r.json().get("name") or r.headers.get("location", "")) if r.content else ""
+
 
 CALL_COLUMNS = [
     "ts_utc", "run_id", "label", "round", "agent", "turn", "attempt", "kind", "path", "stream",
@@ -63,7 +127,7 @@ async def start_worker(run_id: str) -> None:
         from azure.identity.aio import DefaultAzureCredential
 
         _cred = DefaultAzureCredential()
-    await jobs.start_worker(_cred, run_id)
+    await start_job(_cred, run_id)
 
 
 def summarise(calls: list[dict[str, Any]]) -> dict[str, Any]:

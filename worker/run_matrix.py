@@ -15,13 +15,24 @@ import json
 import sys
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from worker.config import PATHS, Settings
 from worker.llm_client import CallResult, Model
 from worker.orchestrator import load_facts
-from worker.prompts import CALIBRATION_FILE, TARGETS_S, build_prompt, load_calibration
+from worker.prompts import TARGETS_S, build_prompt
 from worker.results import append_csv, results_dir
+
+
+def calibration_file() -> Path:
+    return results_dir() / "calibration.json"
+
+
+def load_calibration() -> dict[str, Any]:
+    f = calibration_file()
+    return json.loads(f.read_text()) if f.exists() else {}
+
 
 TOLERANCE = 0.15
 START_FACTS = 250  # small first probe: measures the model's speed cheaply before scaling up
@@ -93,9 +104,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--prompts", default="S,L")
     ap.add_argument("--streams", default="off,on")
     ap.add_argument("--reasoning", default="high")
-    ap.add_argument(
-        "--skip-calibration", action="store_true", help="use worker/prompts/calibration.json"
-    )
+    ap.add_argument("--skip-calibration", action="store_true", help="use results/calibration.json")
     ap.add_argument("--calibrate-only", action="store_true")
     return ap.parse_args(argv)
 
@@ -162,11 +171,11 @@ async def amain(args: argparse.Namespace) -> int:
                     "measured_s": result["measured_s"],
                     "target_s": result["target_s"],
                 }
-            CALIBRATION_FILE.parent.mkdir(parents=True, exist_ok=True)
             try:
-                CALIBRATION_FILE.write_text(json.dumps(calibration, indent=2) + "\n")
+                calibration_file().parent.mkdir(parents=True, exist_ok=True)
+                calibration_file().write_text(json.dumps(calibration, indent=2) + "\n")
             except OSError:
-                pass  # read-only image layer: the CALIBRATION log lines are the record
+                pass  # ephemeral job file system: the CALIBRATION log lines are the record
         missing = [p for p in prompts if p not in calibration]
         if missing:
             print(f"STOP: no calibration for {missing}; run without --skip-calibration", flush=True)

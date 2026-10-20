@@ -15,8 +15,8 @@ import uuid
 from worker.config import RunConfig, Settings
 from worker.llm_client import Model
 from worker.orchestrator import execute
+from worker.search_tool import DocSearch
 from worker.store import make_store, now_utc
-from worker.tools.doc_search import DocSearch
 
 
 async def pipeline() -> int:

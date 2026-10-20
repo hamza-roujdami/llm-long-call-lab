@@ -9,9 +9,9 @@ from worker.config import RunConfig, Settings
 from worker.llm_client import Model, call_context, longest_gap, parse_usage
 from worker.orchestrator import execute, select_by_tokens, summarise
 from worker.results import RECORD_COLUMNS, append_csv, parse_call_lines
+from worker.search_tool import make_search_tool
 from worker.store import MemoryStore
 from worker.tests import fake_model
-from worker.tools.doc_search import make_search_tool
 
 
 def run(coro):

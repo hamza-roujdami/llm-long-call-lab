@@ -43,8 +43,8 @@ resource apimCallsFoundry 'Microsoft.Authorization/roleAssignments@2022-04-01' =
 }
 
 var llmVariants = [
-  { key: 'default', path: 'llm-default', policy: loadTextContent('../../apim/policy-default.xml') }
-  { key: 'stream', path: 'llm-stream', policy: loadTextContent('../../apim/policy-stream.xml') }
+  { key: 'default', path: 'llm-default', policy: loadTextContent('../apim/policy-default.xml') }
+  { key: 'stream', path: 'llm-stream', policy: loadTextContent('../apim/policy-stream.xml') }
 ]
 var llmOperations = [
   { name: 'chat-completions', template: '/chat/completions' }

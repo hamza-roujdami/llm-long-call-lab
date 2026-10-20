@@ -13,8 +13,8 @@ param identityPrincipalId string
 param namePrefix string
 param suffix string
 param imageTag string
-param searchEndpoint string
-param foundryEndpoint string
+param searchName string
+param foundryName string
 param modelName string
 param apimName string
 param apimUrl string
@@ -28,6 +28,35 @@ param labPassword string
 
 @secure()
 param internalToken string
+
+var searchEndpoint = 'https://${searchName}.search.windows.net'
+var foundryEndpoint = 'https://${foundryName}.openai.azure.com'
+var searchIndexDataReaderRole = '1407120a-92aa-4202-b7e9-c0e197c71c8f'
+var openAIUserRole = '5e0bd9bd-7b93-4f28-af87-19fc36ad61bd'
+
+// Data-plane access for the shared identity: read the search index, call the model directly (path 1).
+resource search 'Microsoft.Search/searchServices@2024-06-01-preview' existing = { name: searchName }
+resource foundry 'Microsoft.CognitiveServices/accounts@2025-06-01' existing = { name: foundryName }
+
+resource searchReader 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(search.id, identityPrincipalId, searchIndexDataReaderRole)
+  scope: search
+  properties: {
+    principalId: identityPrincipalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', searchIndexDataReaderRole)
+  }
+}
+
+resource workerCallsFoundry 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(foundry.id, identityPrincipalId, openAIUserRole)
+  scope: foundry
+  properties: {
+    principalId: identityPrincipalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', openAIUserRole)
+  }
+}
 
 resource apim 'Microsoft.ApiManagement/service@2024-05-01' existing = {
   name: apimName
@@ -132,7 +161,7 @@ resource api 'Microsoft.App/containerApps@2024-03-01' = {
       scale: { minReplicas: 1, maxReplicas: 1 }
     }
   }
-  dependsOn: [apiStartsWorker]
+  dependsOn: [apiStartsWorker, searchReader, workerCallsFoundry]
 }
 
 resource web 'Microsoft.App/containerApps@2024-03-01' = {

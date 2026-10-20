@@ -77,12 +77,12 @@ under them times every HTTP call, so the same telemetry covers the demo pipeline
 ```
 web/      Next.js UI: start a run, poll status
 api/      FastAPI: POST /runs, GET /runs/{id}; starts the worker Job
-worker/   Job image: llm_client.py (timed client), orchestrator.py + agents/ (Agent Framework),
-          tools/doc_search.py, run_matrix.py, prompts/ (S and L), tests/
-data/     synthetic design document (generated) + AI Search index uploader
+worker/   llm_client.py (timed model client), orchestrator.py + agents.py (Agent Framework),
+          search_tool.py, run_matrix.py, prompts.py (S and L), tests/
+data/     synthetic design-document generator + AI Search index uploader (output is generated, not committed)
 apim/     policy-default.xml, policy-stream.xml
-infra/    Bicep (+ run-matrix.sh)
-results/  CSV per run + README with the results table
+infra/    main.bicep (+ apim.bicep, apps.bicep), run-matrix.sh
+results/  CSVs (see "Results files" below)
 ```
 
 ## Results so far
@@ -142,8 +142,8 @@ Prerequisites: Azure CLI, Python 3.13, Node 22. Copy `.env.example` to `.env` an
 python3.13 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 .venv/bin/python -m pytest -q && .venv/bin/ruff check .
 
-# synthetic data (already committed; regenerate with a different size or seed if needed)
-python data/generate_synthetic_docs.py --pages 180
+# synthetic data is generated (git-ignored): the worker image builds it, tests build a small copy.
+# To inspect it locally: python data/generate_synthetic_docs.py --pages 180
 ```
 
 **Deploy** (creates billable resources: APIM Developer is the main cost driver; get a cost estimate first):
@@ -170,8 +170,18 @@ infra/run-matrix.sh v1 max-output-tokens=120000 confirm-spend   # step 0: calibr
 ```
 
 Step 0 stops and reports if S (≈300 s) or L (≈450 s) cannot be reached. Console lines (`CALL {json}`) land in Log Analytics
-(`ContainerAppConsoleLogs_CL`); APIM `ApiManagementGatewayLogs` go to the same workspace. Rebuild a CSV with
-`python -m worker.results results/runs.csv < logs.txt`.
+(`ContainerAppConsoleLogs_CL`); APIM `ApiManagementGatewayLogs` go to the same workspace.
+
+## Results files
+
+Labels: **expected** = stated in Microsoft Learn (cited above); **observed** = measured in our runs. Never record an
+Azure-behaviour claim without one of the two. Rebuild a CSV from job logs with `python -m worker.results results/<file>.csv < logs.txt`.
+
+| File | What it is |
+|---|---|
+| `results/runs.csv` | Real-model matrix (calibration + 12 cells). **Not run yet** (cost guard). `results/calibration.json` appears next to it. |
+| `results/smoke.csv` | Observed: tiny capped pipeline runs on GPT-6 Sol (reasoning low). Verifies agents and telemetry; not timeout evidence. |
+| `results/mock-probe.csv` | Observed on a **mock backend** (silent on purpose), harness since removed (commit `00e7732`). Older schema; not GPT-6 Sol evidence. |
 
 ## Notes and limitations
 

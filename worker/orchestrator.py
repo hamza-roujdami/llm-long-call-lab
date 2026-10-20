@@ -19,8 +19,8 @@ from worker.agents import (
 )
 from worker.config import RunConfig, Settings
 from worker.llm_client import Model, Recorder, call_context
+from worker.search_tool import SearchFn, make_search_tool
 from worker.store import Store, now_utc
-from worker.tools.doc_search import SearchFn, make_search_tool
 
 
 def load_facts(path: str) -> list[dict[str, Any]]:

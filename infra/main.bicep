@@ -46,40 +46,99 @@ param labPassword string
 param internalToken string
 
 var suffix = take(uniqueString(resourceGroup().id), 5)
-var acrName = replace('${namePrefix}acr${suffix}', '-', '')
 var apimName = '${namePrefix}-apim-${suffix}'
-var lawName = '${namePrefix}-law-${suffix}'
-var searchName = '${namePrefix}-search-${suffix}'
 var foundryName = '${namePrefix}-fdy-${suffix}'
 
-module monitoring 'modules/monitoring.bicep' = {
-  name: 'monitoring'
-  params: { name: lawName, location: location }
-}
+var acrPullRole = '7f951dda-4ed3-4680-a7ca-43fe172d538d'
 
-module registry 'modules/registry.bicep' = {
-  name: 'registry'
-  params: { acrName: acrName, identityName: '${namePrefix}-id-${suffix}', location: location }
-}
-
-module search 'modules/search.bicep' = {
-  name: 'search'
-  params: { name: searchName, location: searchLocation, sku: searchSku }
-}
-
-module foundry 'modules/foundry.bicep' = {
-  name: 'foundry'
-  params: {
-    name: foundryName
-    location: location
-    modelName: modelName
-    modelVersion: modelVersion
-    deploymentSku: modelSku
-    capacity: modelCapacity
+// ---- Observability: ACA console logs (results) and APIM gateway logs (metadata only)
+resource law 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
+  name: '${namePrefix}-law-${suffix}'
+  location: location
+  properties: {
+    sku: { name: 'PerGB2018' }
+    retentionInDays: 30
   }
 }
 
-module apim 'modules/apim.bicep' = {
+// ---- Registry + one user-assigned identity shared by web, api and worker (lab simplification).
+// Needs permission to create role assignments (Owner or User Access Administrator) on the resource group.
+resource acr 'Microsoft.ContainerRegistry/registries@2023-07-01' = {
+  name: replace('${namePrefix}acr${suffix}', '-', '')
+  location: location
+  sku: { name: 'Basic' }
+  properties: { adminUserEnabled: false }
+}
+
+resource identity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
+  name: '${namePrefix}-id-${suffix}'
+  location: location
+}
+
+resource acrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(acr.id, identity.id, acrPullRole)
+  scope: acr
+  properties: {
+    principalId: identity.properties.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', acrPullRole)
+  }
+}
+
+// ---- AI Search for the ai_search tool (Entra auth for the apps; the admin key only seeds the index)
+resource search 'Microsoft.Search/searchServices@2024-06-01-preview' = {
+  name: '${namePrefix}-search-${suffix}'
+  location: searchLocation
+  sku: { name: searchSku }
+  properties: {
+    replicaCount: 1
+    partitionCount: 1
+    hostingMode: 'default'
+    authOptions: { aadOrApiKey: { aadAuthFailureMode: 'http401WithBearerChallenge' } }
+  }
+}
+
+// ---- Microsoft Foundry (AIServices) with the GPT-6 Sol deployment. Key auth is off: callers use Entra
+// tokens (the worker directly, APIM through its own identity).
+resource foundry 'Microsoft.CognitiveServices/accounts@2025-06-01' = {
+  name: foundryName
+  location: location
+  kind: 'AIServices'
+  sku: { name: 'S0' }
+  identity: { type: 'SystemAssigned' }
+  properties: {
+    customSubDomainName: foundryName
+    publicNetworkAccess: 'Enabled'
+    disableLocalAuth: true
+  }
+}
+
+resource model 'Microsoft.CognitiveServices/accounts/deployments@2025-06-01' = {
+  parent: foundry
+  name: modelName
+  sku: { name: modelSku, capacity: modelCapacity }
+  properties: {
+    model: { format: 'OpenAI', name: modelName, version: modelVersion }
+  }
+}
+
+// ---- Container Apps environment (Consumption)
+resource env 'Microsoft.App/managedEnvironments@2024-03-01' = {
+  name: '${namePrefix}-env-${suffix}'
+  location: location
+  properties: {
+    appLogsConfiguration: {
+      destination: 'log-analytics'
+      logAnalyticsConfiguration: {
+        customerId: law.properties.customerId
+        sharedKey: law.listKeys().primarySharedKey
+      }
+    }
+  }
+}
+
+// ---- APIM with the two Foundry APIs (paths 2 and 3)
+module apim 'apim.bicep' = {
   name: 'apim'
   params: {
     name: apimName
@@ -87,63 +146,46 @@ module apim 'modules/apim.bicep' = {
     publisherEmail: apimPublisherEmail
     publisherName: apimPublisherName
     sku: apimSku
-    foundryName: foundry.outputs.name
-    foundryEndpoint: foundry.outputs.endpoint
-    logAnalyticsId: monitoring.outputs.id
+    foundryName: foundry.name
+    foundryEndpoint: 'https://${foundry.name}.openai.azure.com'
+    logAnalyticsId: law.id
   }
 }
 
-module roles 'modules/roles.bicep' = {
-  name: 'roles'
-  params: {
-    identityPrincipalId: registry.outputs.identityPrincipalId
-    searchName: search.outputs.name
-    foundryName: foundry.outputs.name
-  }
-}
-
-module aca 'modules/aca.bicep' = {
-  name: 'aca'
-  params: {
-    envName: '${namePrefix}-env-${suffix}'
-    location: location
-    logAnalyticsName: monitoring.outputs.name
-  }
-}
-
-module apps 'modules/apps.bicep' = if (deployApps) {
+// ---- App tier (phase 2)
+module apps 'apps.bicep' = if (deployApps) {
   name: 'apps'
   params: {
     location: location
-    envId: aca.outputs.envId
-    registryServer: registry.outputs.loginServer
-    identityId: registry.outputs.identityId
-    identityClientId: registry.outputs.identityClientId
-    identityPrincipalId: registry.outputs.identityPrincipalId
+    envId: env.id
+    registryServer: acr.properties.loginServer
+    identityId: identity.id
+    identityClientId: identity.properties.clientId
+    identityPrincipalId: identity.properties.principalId
     namePrefix: namePrefix
     suffix: suffix
     imageTag: imageTag
-    searchEndpoint: search.outputs.endpoint
-    foundryEndpoint: foundry.outputs.endpoint
-    modelName: foundry.outputs.deployment
+    searchName: search.name
+    foundryName: foundry.name
+    modelName: model.name
     apimName: apim.outputs.name
     apimUrl: apim.outputs.gatewayUrl
     llmMaxAttempts: llmMaxAttempts
     llmRetryBackoffSeconds: llmRetryBackoffSeconds
     labPassword: labPassword
     internalToken: internalToken
-    envDefaultDomain: aca.outputs.defaultDomain
+    envDefaultDomain: env.properties.defaultDomain
   }
-  dependsOn: [roles]
+  dependsOn: [acrPull]
 }
 
-output acrName string = registry.outputs.acrName
+output acrName string = acr.name
 output apimName string = apim.outputs.name
 output apimGatewayUrl string = apim.outputs.gatewayUrl
-output logAnalyticsName string = lawName
-output searchName string = search.outputs.name
-output searchEndpoint string = search.outputs.endpoint
-output foundryName string = foundry.outputs.name
-output foundryEndpoint string = foundry.outputs.endpoint
+output logAnalyticsName string = law.name
+output searchName string = search.name
+output searchEndpoint string = 'https://${search.name}.search.windows.net'
+output foundryName string = foundry.name
+output foundryEndpoint string = 'https://${foundry.name}.openai.azure.com'
 output webUrl string = deployApps ? apps!.outputs.webUrl : ''
 output workerJobName string = deployApps ? apps!.outputs.workerJobName : ''

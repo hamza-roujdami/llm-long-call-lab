@@ -1,3 +1,10 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = []  # dependency list only; the code runs from the repo (python -m worker, uvicorn api.main:app)
+
 [project]
 name = "apim-timeout-lab"
 version = "0.1.0"
@@ -31,5 +38,5 @@ ignore = ["E501"]  # long prose strings in prompts/docs; the formatter handles c
 extend-immutable-calls = ["fastapi.Depends", "fastapi.Body", "fastapi.Header"]
 
 [tool.pytest.ini_options]
-testpaths = ["worker/tests", "api/tests"]
+testpaths = ["worker/tests", "api"]
 pythonpath = ["."]

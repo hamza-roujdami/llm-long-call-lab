@@ -4,7 +4,7 @@ import httpx
 import pytest
 
 from api import main
-from api.store import MemoryStore
+from api.main import MemoryStore
 
 
 @pytest.fixture
