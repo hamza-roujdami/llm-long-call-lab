@@ -1,7 +1,7 @@
 """Generate a SYNTHETIC high-level design document and its facts[] list.
 
 Everything is fictional and produced from a seeded RNG (no real customer data). Output:
-  data/synthetic_docs/design_document.md   readable document, one section per page
+  data/synthetic_docs/design_document.md   readable document, one section per page (git-ignored)
   data/synthetic_docs/facts.jsonl          one fact per line (the planner payload source)
   data/synthetic_docs/pages.jsonl          one search document per page (indexed in AI Search)
 

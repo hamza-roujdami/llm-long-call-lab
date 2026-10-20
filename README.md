@@ -91,7 +91,7 @@ results/  CSV per run + README with the results table
 
 - *Observed (our run, GPT-6 Sol, tiny capped smoke runs):* the agent pipeline (planner, 4 section agents, `ai_search`
   tool calls) completes on paths 1 and 3 with streaming, about 35-40 s end to end
-  ([results/smoke-*.csv](results)). These runs are far too short to say anything about timeouts.
+  ([results/smoke.csv](results/smoke.csv)). These runs are far too short to say anything about timeouts.
 - *Observed (our run, **mock backend**, since removed):* an earlier harness (git commit `00e7732`) sent calls from the
   same ACA Job to a fake backend that stayed silent on purpose. It only shows that the hops *can* cut idle connections;
   it says nothing about GPT-6 Sol.

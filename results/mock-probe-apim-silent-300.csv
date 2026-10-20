@@ -1,2 +1,0 @@
-run_id,started_utc,scenario,hypothesis,target,path,query,client_stream,parallel_index,parallel_total,http_status,outcome,error_type,error_detail,ttfh_s,ttfb_s,longest_gap_s,last_chunk_s,chunks,bytes,total_s,client_request_id,server_request_ids,extra
-20261020T182923Z,2026-10-20T18:29:23+00:00,apim-silent-300,H1,apim,lab/silent,delay=300,False,0,1,500,http_error,,"{ ""statusCode"": 500, ""message"": ""Internal server error"", ""activityId"": ""b6c6bd4c-b9ad-4ac8-8824-10a54158d06f"" }",230.144,,,,0,111,230.145,8e7b9a38-d25b-45e1-a4e8-cfb8924190a7,,
