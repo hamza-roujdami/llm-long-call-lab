@@ -1,10 +1,9 @@
 """Long-call measurement client for the ACA Job -> APIM -> model lab.
 
 Examples:
-  python -m client.run --list
-  python -m client.run --scenario apim-stream-450
-  python -m client.run --target direct --endpoint stream --param total=20 --param interval=2
-  python -m client.run --openai --target apim            # real model through OpenAI SDK
+  python -m probe.job.run --list
+  python -m probe.job.run --scenario apim-stream-450
+  python -m probe.job.run --target direct --endpoint stream --param total=20 --param interval=2
 
 Retries are disabled so every measured call is a single attempt. Results are appended to a CSV
 and ALSO printed as `RESULT {json}` lines, because ACA Job file systems are ephemeral and the
@@ -25,8 +24,8 @@ from pathlib import Path
 import httpx
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from client.metrics import CSV_COLUMNS, Result, classify, has_done_marker, longest_gap, pick_ids
-from client.scenarios import SCENARIOS, Scenario
+from probe.job.metrics import CSV_COLUMNS, Result, classify, has_done_marker, longest_gap, pick_ids
+from probe.job.scenarios import SCENARIOS, Scenario
 
 
 class Settings(BaseSettings):
@@ -40,12 +39,6 @@ class Settings(BaseSettings):
     apim_buffered_path: str = "lab-buffered"
     results_dir: str = "results"
     client_timeout_s: float = 900.0  # per-read timeout; deliberately longer than every scenario
-
-    openai_base_url: str = ""
-    openai_api_key: str = ""
-    openai_model: str = ""
-    openai_auth_header: str = "api-key"
-    openai_prompt: str = "Write a long, detailed essay about the history of timeouts."
 
 
 def _utc_now() -> str:
@@ -110,68 +103,6 @@ async def run_http(sc: Scenario, st: Settings, run_id: str, idx: int) -> Result:
     return _finish(res, times, tail, error)
 
 
-async def run_openai(
-    st: Settings, target: str, stream: bool, run_id: str, idx: int, total: int
-) -> Result:
-    from openai import APIStatusError, AsyncOpenAI  # optional dependency
-
-    rid = str(uuid.uuid4())
-    res = Result(
-        run_id=run_id,
-        started_utc=_utc_now(),
-        scenario="openai-real-model",
-        hypothesis="",
-        target=target,
-        path=st.openai_base_url,
-        client_stream=stream,
-        parallel_index=idx,
-        parallel_total=total,
-        client_request_id=rid,
-    )
-    headers = {"x-client-request-id": rid}
-    if st.openai_auth_header:
-        headers[st.openai_auth_header] = st.openai_api_key
-    client = AsyncOpenAI(
-        base_url=st.openai_base_url,
-        api_key=st.openai_api_key or "unused",
-        max_retries=0,
-        timeout=st.client_timeout_s,
-        default_headers=headers,
-    )
-    times: list[float] = []
-    error: BaseException | None = None
-    saw_done = False
-    t0 = time.monotonic()
-    try:
-        raw = await client.chat.completions.with_raw_response.create(
-            model=st.openai_model,
-            messages=[{"role": "user", "content": st.openai_prompt}],
-            stream=stream,
-        )
-        res.http_status = raw.status_code
-        res.ttfh_s = time.monotonic() - t0
-        res.server_request_ids = pick_ids(dict(raw.headers))
-        parsed = raw.parse()
-        if stream:
-            async for _ in parsed:
-                times.append(time.monotonic() - t0)
-        saw_done = True
-    except APIStatusError as e:
-        res.http_status = e.status_code
-        res.server_request_ids = pick_ids(dict(e.response.headers))
-        res.error_type, res.error_detail = type(e).__name__, str(e)[:200]
-    except Exception as e:  # noqa: BLE001 - record whatever the SDK raised
-        error = e
-        res.error_type, res.error_detail = type(e).__name__, str(e)[:200]
-    res.total_s = time.monotonic() - t0
-    res.chunks = len(times)
-    res.ttfb_s = times[0] if times else None
-    res.longest_gap_s = longest_gap(times)
-    res.last_chunk_s = times[-1] if times else None
-    res.outcome = classify(res.http_status, saw_done, error)
-    return res
-
-
 def _finish(res: Result, times: list[float], tail: bytes, error: BaseException | None) -> Result:
     res.chunks = len(times)
     res.ttfb_s = times[0] if times else None
@@ -208,18 +139,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--no-stream", action="store_true", help="read the body in one go")
     p.add_argument("--apim-variant", choices=["stream", "buffered"], default="stream")
     p.add_argument("--parallel", type=int, default=1)
-    p.add_argument("--openai", action="store_true", help="real-model mode via the OpenAI SDK")
     p.add_argument("--out", help="CSV path (default results/<scenario>-<utc>.csv)")
     return p.parse_args(argv)
 
 
-def resolve(args: argparse.Namespace) -> Scenario | None:
+def resolve(args: argparse.Namespace) -> Scenario:
     if args.scenario:
         return SCENARIOS[args.scenario]
-    if args.openai:
-        return None
     if not (args.target and args.endpoint):
-        sys.exit("choose --scenario NAME, or --target and --endpoint, or --openai (see --list)")
+        sys.exit("choose --scenario NAME, or --target and --endpoint (see --list)")
     params = {k: float(v) for k, v in (kv.split("=", 1) for kv in args.param)}
     return Scenario(
         "custom",
@@ -237,14 +165,6 @@ async def amain(args: argparse.Namespace) -> list[Result]:
     st = Settings()
     run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     sc = resolve(args)
-    if sc is None:
-        n = args.parallel
-        target = args.target or "apim"
-        return list(
-            await asyncio.gather(
-                *(run_openai(st, target, not args.no_stream, run_id, i, n) for i in range(n))
-            )
-        )
     return list(await asyncio.gather(*(run_http(sc, st, run_id, i) for i in range(sc.parallel))))
 
 
@@ -258,17 +178,20 @@ def main(argv: list[str] | None = None) -> None:
             )
         return
     results = asyncio.run(amain(args))
-    label = args.scenario or ("openai" if args.openai else "custom")
+    label = args.scenario or "custom"
     out = (
         Path(args.out)
         if args.out
         else Path(Settings().results_dir)
         / (f"{label}-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.csv")
     )
-    write_csv(out, results)
     for r in results:
         print("RESULT " + json.dumps(_round(r.row())), flush=True)
-    print(f"wrote {len(results)} row(s) to {out}", file=sys.stderr)
+    try:
+        write_csv(out, results)
+        print(f"wrote {len(results)} row(s) to {out}", file=sys.stderr)
+    except OSError as e:
+        print(f"CSV not written ({e}); RESULT lines above are the record", file=sys.stderr)
 
 
 if __name__ == "__main__":

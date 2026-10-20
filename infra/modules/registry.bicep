@@ -31,3 +31,5 @@ resource pull 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
 output acrName string = acr.name
 output loginServer string = acr.properties.loginServer
 output identityId string = id.id
+output identityPrincipalId string = id.properties.principalId
+output identityClientId string = id.properties.clientId

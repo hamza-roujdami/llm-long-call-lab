@@ -23,3 +23,13 @@ results/scratch/
 # OS / editor
 .DS_Store
 .idea/
+
+# Node
+node_modules/
+.next/
+web/next-env.d.ts
+
+# Customer-provided material: never commit (lab holds synthetic data only)
+cx-docs/
+*.docx
+*.xlsx

@@ -1,5 +1,5 @@
-// ACA environment (Consumption) + manual-trigger Job (no ingress). The job is created only when
-// deployJob is true, i.e. after the client image exists in ACR.
+// ACA environment (Consumption) + the timeout-probe Job (no ingress). The job is created only when
+// deployJob is true, i.e. after the probe image exists in ACR.
 param envName string
 param jobName string
 param location string
@@ -10,12 +10,22 @@ param registryServer string
 param identityId string
 param mockBaseUrl string
 param apimBaseUrl string
+param apimName string
 
 @secure()
 param mockApiKey string
 
-@secure()
-param apimSubscriptionKey string
+// Resolved here (not in main.bicep) so the lookup runs after the APIM module has created the subscription.
+resource apim 'Microsoft.ApiManagement/service@2024-05-01' existing = {
+  name: apimName
+}
+
+resource clientSub 'Microsoft.ApiManagement/service/subscriptions@2024-05-01' existing = {
+  parent: apim
+  name: 'lab-client'
+}
+
+var apimSubscriptionKey = clientSub.listSecrets().primaryKey
 
 resource law 'Microsoft.OperationalInsights/workspaces@2023-09-01' existing = {
   name: logAnalyticsName
@@ -58,7 +68,7 @@ resource job 'Microsoft.App/jobs@2024-03-01' = if (deployJob) {
     template: {
       containers: [
         {
-          name: 'client'
+          name: 'probe'
           image: image
           resources: { cpu: json('0.25'), memory: '0.5Gi' }
           env: [
@@ -74,3 +84,5 @@ resource job 'Microsoft.App/jobs@2024-03-01' = if (deployJob) {
 }
 
 output envName string = env.name
+output envId string = env.id
+output defaultDomain string = env.properties.defaultDomain

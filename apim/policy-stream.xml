@@ -1,0 +1,28 @@
+<!--
+  Config B for the Foundry (GPT-6 Sol) API: identical to policy-default.xml except the backend
+  section, which sets buffer-response="false" and an explicit 600 s timeout.
+  `timeout` is the wait for response HEADERS; Learn says values above 240 s may not be honoured,
+  so 600 is deliberate: we are testing what the platform does, not what the policy asks for.
+  https://learn.microsoft.com/azure/api-management/forward-request-policy
+  https://learn.microsoft.com/azure/api-management/how-to-server-sent-events
+-->
+<policies>
+  <inbound>
+    <base />
+    <authentication-managed-identity resource="https://cognitiveservices.azure.com" output-token-variable-name="mi-token" ignore-error="false" />
+    <set-header name="Authorization" exists-action="override">
+      <value>@("Bearer " + (string)context.Variables["mi-token"])</value>
+    </set-header>
+    <set-header name="api-key" exists-action="delete" />
+    <set-header name="Ocp-Apim-Subscription-Key" exists-action="delete" />
+  </inbound>
+  <backend>
+    <forward-request timeout="600" buffer-response="false" fail-on-error-status-code="false" />
+  </backend>
+  <outbound>
+    <base />
+  </outbound>
+  <on-error>
+    <base />
+  </on-error>
+</policies>

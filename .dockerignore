@@ -12,3 +12,6 @@ apim
 results
 tests
 docs
+
+**/node_modules
+**/.next

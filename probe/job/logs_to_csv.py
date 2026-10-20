@@ -1,7 +1,7 @@
 """Rebuild a results CSV from ACA Job console logs (`RESULT {json}` lines on stdin).
 
   az containerapp job logs show -n <job> -g <rg> --container client --format text \
-    | python -m client.logs_to_csv results/<name>.csv
+    | python -m probe.job.logs_to_csv results/<name>.csv
 
 Also accepts Log Analytics exports where the line is embedded in a larger string.
 """
@@ -11,7 +11,7 @@ import json
 import sys
 from pathlib import Path
 
-from client.metrics import CSV_COLUMNS
+from probe.job.metrics import CSV_COLUMNS
 
 
 def parse_lines(lines: list[str]) -> list[dict[str, object]]:
@@ -30,7 +30,7 @@ def parse_lines(lines: list[str]) -> list[dict[str, object]]:
 
 def main() -> None:
     if len(sys.argv) != 2:
-        sys.exit("usage: python -m client.logs_to_csv OUT.csv < logs.txt")
+        sys.exit("usage: python -m probe.job.logs_to_csv OUT.csv < logs.txt")
     rows = parse_lines(sys.stdin.read().splitlines())
     out = Path(sys.argv[1])
     out.parent.mkdir(parents=True, exist_ok=True)

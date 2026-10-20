@@ -56,7 +56,7 @@ Scenario names are accepted by `python -m client.run --scenario <name>` (list: `
 | 6 | `apim-stream-buffered-450` | buffering policy | `/stream` total 450 | H2 |
 | 7 | `apim-stream-parallel3-450` | streaming policy | 3 parallel `/stream` 450 | H2 |
 
-Optional controls: `direct-stream-450`, `apim-silent-200`, `apim-gap-200`. Custom runs:
+Optional controls: `direct-stream-450`, `apim-silent-200`, `apim-gap-200`; `smoke` is a 20 s APIM stream for checking the Job path. Custom runs:
 `python -m client.run --target apim --endpoint gap --param gap=240 --apim-variant stream`.
 Real model: `python -m client.run --openai --target apim [--no-stream]` (set `OPENAI_*` in `.env`).
 Retries are off; the client read timeout (900 s) is longer than every scenario so the client is never the limiter.
@@ -93,7 +93,7 @@ az acr build -r <acr> -t mock:latest   -f mock/Dockerfile .
 az acr build -r <acr> -t client:latest -f client/Dockerfile .
 DEPLOY_COMPUTE=true az deployment group create -g "rg-$NAME_PREFIX" -p infra/main.bicepparam   # phase 2
 az containerapp job start -n <job> -g "rg-$NAME_PREFIX" --container-name client \
-  --args "--scenario" "apim-stream-450"
+  --image <acr>.azurecr.io/client:latest --env-vars SCENARIO=apim-stream-450
 ```
 
 (`<acr>`, `<job>` come from the deployment outputs.)

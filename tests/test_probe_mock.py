@@ -4,7 +4,7 @@ import time
 import httpx
 import pytest
 
-from mock.app import app, settings
+from probe.mock.app import app, settings
 
 
 def get(path: str, **kw) -> tuple[httpx.Response, float]:

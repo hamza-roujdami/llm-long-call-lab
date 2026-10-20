@@ -1,0 +1,2 @@
+run_id,started_utc,scenario,hypothesis,target,path,query,client_stream,parallel_index,parallel_total,http_status,outcome,error_type,error_detail,ttfh_s,ttfb_s,longest_gap_s,last_chunk_s,chunks,bytes,total_s,client_request_id,server_request_ids,extra
+20261020T182922Z,2026-10-20T18:29:22+00:00,direct-silent-300,H4,direct,silent,delay=300,False,0,1,,error,ReadTimeout,,,,,,0,0,900.158,7bd8b363-f36a-43ad-8c14-0fb9d97c6a03,,

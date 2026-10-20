@@ -45,6 +45,7 @@ SCENARIOS: dict[str, Scenario] = {
             parallel=3,
         ),
         # Controls / boundary probes (optional)
+        Scenario("smoke", "", "apim", "stream", {"total": 20, "interval": 5}),
         Scenario("direct-stream-450", "H4", "direct", "stream", {"total": 450, "interval": 10}),
         Scenario("apim-silent-200", "H1", "apim", "silent", {"delay": 200}, client_stream=False),
         Scenario("apim-gap-200", "H3", "apim", "gap", {"first": 10, "gap": 200, "then": 30}),

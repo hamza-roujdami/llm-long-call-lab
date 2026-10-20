@@ -1,10 +1,10 @@
 import csv
 import json
 
-from client.logs_to_csv import parse_lines
-from client.metrics import CSV_COLUMNS, Result, classify, has_done_marker, longest_gap, pick_ids
-from client.run import Settings, build_request, write_csv
-from client.scenarios import SCENARIOS
+from probe.job.logs_to_csv import parse_lines
+from probe.job.metrics import CSV_COLUMNS, Result, classify, has_done_marker, longest_gap, pick_ids
+from probe.job.run import Settings, build_request, write_csv
+from probe.job.scenarios import SCENARIOS
 
 
 def test_longest_gap():

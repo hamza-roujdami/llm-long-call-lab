@@ -1,0 +1,2 @@
+run_id,started_utc,scenario,hypothesis,target,path,query,client_stream,parallel_index,parallel_total,http_status,outcome,error_type,error_detail,ttfh_s,ttfb_s,longest_gap_s,last_chunk_s,chunks,bytes,total_s,client_request_id,server_request_ids,extra
+20261020T182926Z,2026-10-20T18:29:26+00:00,apim-stream-450,H2,apim,lab/stream,total=450&interval=10,True,0,1,200,completed,,,0.084,0.084,10.689,450.085,46,1465,450.086,7a148d3a-1b21-438d-abbe-c7e718dc720d,x-mock-request-id=7a148d3a-1b21-438d-abbe-c7e718dc720d,

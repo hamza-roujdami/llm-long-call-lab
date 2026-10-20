@@ -1,0 +1,60 @@
+"""Worker settings (environment) and the per-run configuration chosen in the UI."""
+
+from pathlib import Path
+from typing import Literal
+
+from pydantic import BaseModel
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_FACTS = ROOT / "data" / "synthetic_docs" / "facts.jsonl"
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    run_id: str = ""
+    store_mode: Literal["api", "memory"] = "api"
+    run_config_json: str = ""  # memory mode only: config for a local run
+
+    api_url: str = ""  # internal URL of the api, which holds run state
+    internal_token: str = ""
+    foundry_endpoint: str = ""  # https://<name>.openai.azure.com
+    apim_url: str = ""  # https://<apim>.azure-api.net
+    apim_key: str = ""
+    model: str = "gpt-6-sol"  # Foundry deployment name
+    search_endpoint: str = ""
+    search_index: str = "design-pages"
+
+    # Test/local only: send "direct" calls here instead of Foundry (e.g. the fake model).
+    direct_base_url_override: str = ""
+    direct_key_override: str = ""
+
+    # Retry policy: PLACEHOLDER defaults (single attempt) until the customer's real settings are known.
+    llm_max_attempts: int = 1
+    llm_retry_backoff_s: float = 5.0
+    llm_read_timeout_s: float = (
+        3600.0  # longer than any scenario; the client must not be the limiter
+    )
+
+    facts_path: str = str(DEFAULT_FACTS)
+
+
+class RunConfig(BaseModel):
+    path: Literal["direct", "gateway"] = "direct"
+    gateway_variant: Literal["default", "stream"] = "stream"  # APIM config A (default) / B (stream)
+    stream: bool = True
+    api: Literal["responses", "chat"] = "responses"  # chat rejects tools + reasoning on GPT-6 Sol
+    reasoning_effort: str = "high"
+    fact_tokens: int = (
+        80_000  # facts[] size (chars/4 estimate); real tokens are ~1.25x, so 80K ~ 100K
+    )
+    section_fact_tokens: int = 20_000
+    rounds: int = 1  # repeat the whole pipeline to stretch a run to 20-30 minutes
+    max_tool_turns: int = 2
+    max_output_tokens: int = 16_000
+    agents: list[str] = ["cover", "network", "addressing", "compute"]
+    depth: Literal["normal", "exhaustive"] = (
+        "normal"  # exhaustive: planner checks every fact (long call)
+    )
+    note: str = ""
