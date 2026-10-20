@@ -1,15 +1,23 @@
 [project]
 name = "apim-timeout-lab"
 version = "0.1.0"
-description = "Lab to measure long-call behaviour on ACA Job -> APIM -> model"
+description = "Measure where long LLM calls get cut on Azure (ACA Job -> direct | APIM -> Foundry)"
 requires-python = ">=3.13"
-dependencies = []
+# Dev environment for tests and linting. The container images install their own runtime deps.
+dependencies = [
+  "agent-framework-core>=1.21",
+  "agent-framework-openai>=1.16",
+  "openai>=1.109",
+  "httpx>=0.28",
+  "pydantic-settings>=2.6",
+  "azure-identity>=1.19",
+  "aiohttp>=3.10",
+  "fastapi>=0.115",
+  "uvicorn>=0.32",
+]
 
 [project.optional-dependencies]
-mock = ["fastapi>=0.115", "uvicorn>=0.32", "pydantic-settings>=2.6"]
-client = ["httpx>=0.28", "pydantic-settings>=2.6"]
-openai = ["openai>=1.50"]
-dev = ["pytest>=8", "ruff>=0.8", "fastapi>=0.115", "uvicorn>=0.32", "httpx>=0.28", "pydantic-settings>=2.6"]
+dev = ["pytest>=8", "ruff>=0.8"]
 
 [tool.ruff]
 line-length = 100
@@ -19,9 +27,9 @@ target-version = "py313"
 select = ["E", "F", "I", "UP", "B", "ASYNC"]
 ignore = ["E501"]  # long prose strings in prompts/docs; the formatter handles code
 
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-pythonpath = ["."]
-
 [tool.ruff.lint.flake8-bugbear]
 extend-immutable-calls = ["fastapi.Depends", "fastapi.Body", "fastapi.Header"]
+
+[tool.pytest.ini_options]
+testpaths = ["worker/tests", "api/tests"]
+pythonpath = ["."]

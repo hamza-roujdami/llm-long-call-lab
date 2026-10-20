@@ -15,7 +15,7 @@ const fmt = (v) => (v === undefined || v === null || v === "" ? "" : typeof v ==
 
 export default function Home() {
   const [form, setForm] = useState({
-    path: "direct", gateway_variant: "stream", stream: true, api: "responses", reasoning_effort: "high",
+    path: "direct", stream: true, reasoning_effort: "high",
     fact_tokens: 80000, max_output_tokens: 16000, depth: "normal", rounds: 1, note: "",
   });
   const [runs, setRuns] = useState([]);
@@ -75,25 +75,12 @@ export default function Home() {
       <form onSubmit={start} style={{ ...card, display: "flex", flexWrap: "wrap", gap: 16, alignItems: "end" }}>
         <label>Path<br />
           <select value={form.path} onChange={set("path")}>
-            <option value="direct">Direct to Foundry</option>
-            <option value="gateway">Via APIM</option>
+            <option value="direct">1. Direct to Foundry</option>
+            <option value="apim-default">2. APIM, no policy (default forward-request)</option>
+            <option value="apim-stream">3. APIM, timeout=600 + buffer-response=false</option>
           </select>
         </label>
-        {form.path === "gateway" && (
-          <label>APIM config<br />
-            <select value={form.gateway_variant} onChange={set("gateway_variant")}>
-              <option value="default">A: default policy (buffered)</option>
-              <option value="stream">B: buffer-response=false, timeout 600</option>
-            </select>
-          </label>
-        )}
         <label><input type="checkbox" checked={form.stream} onChange={set("stream")} /> Stream</label>
-        <label>API<br />
-          <select value={form.api} onChange={set("api")}>
-            <option value="responses">Responses</option>
-            <option value="chat">Chat Completions</option>
-          </select>
-        </label>
         <label>Reasoning<br />
           <select value={form.reasoning_effort} onChange={set("reasoning_effort")}>
             {["none", "minimal", "low", "medium", "high"].map((x) => <option key={x}>{x}</option>)}
@@ -145,7 +132,7 @@ export default function Home() {
               {run.error && <p style={{ color: "#b00020" }}>{run.error}</p>}
               {summary && (
                 <p style={{ fontSize: 14 }}>
-                  calls {summary.llm_calls} (failed {summary.failed_calls}) · max first-byte {fmt(summary.max_ttfb_s)}s ·
+                  calls {summary.llm_calls} (failed {summary.failed_calls}) · max first-token {fmt(summary.max_ttft_s ?? summary.max_ttfb_s)}s ·
                   longest gap {fmt(summary.max_longest_gap_s)}s · longest call {fmt(summary.max_call_total_s)}s ·
                   tokens in/out/reasoning {summary.prompt_tokens}/{summary.completion_tokens}/{summary.reasoning_tokens}
                   {summary.elapsed_s !== undefined && <> · elapsed {summary.elapsed_s}s</>}
@@ -158,12 +145,12 @@ export default function Home() {
               <div style={{ overflowX: "auto" }}>
                 <table style={{ borderCollapse: "collapse", fontSize: 13 }}>
                   <thead>
-                    <tr>{["rnd", "agent", "kind", "turn", "att", "http", "outcome", "ttfh s", "ttfb s", "longest gap s", "total s", "in", "out", "reasoning", "error"].map((h) => <th key={h} style={th}>{h}</th>)}</tr>
+                    <tr>{["rnd", "agent", "kind", "turn", "att", "http", "outcome", "ttfh s", "first token s", "longest gap s", "total s", "in", "out", "reasoning", "error"].map((h) => <th key={h} style={th}>{h}</th>)}</tr>
                   </thead>
                   <tbody>
                     {(run.calls || []).map((c, i) => (
                       <tr key={i}>
-                        {[c.round, c.agent, c.kind === "tool" ? c.path : "llm", c.turn, c.attempt, c.http_status, c.outcome, c.ttfh_s, c.ttfb_s, c.longest_gap_s, c.total_s, c.prompt_tokens, c.completion_tokens, c.reasoning_tokens, c.error_type].map((v, j) => (
+                        {[c.round, c.agent, c.kind === "tool" ? c.path : "llm", c.turn, c.attempt, c.http_status, c.outcome, c.ttfh_s, c.ttft_s ?? c.ttfb_s, c.longest_gap_s, c.total_s, c.prompt_tokens, c.completion_tokens, c.reasoning_tokens, c.error_type].map((v, j) => (
                           <td key={j} style={{ ...td, color: j === 6 && v && v !== "completed" ? "#b00020" : undefined }}>{fmt(v)}</td>
                         ))}
                       </tr>

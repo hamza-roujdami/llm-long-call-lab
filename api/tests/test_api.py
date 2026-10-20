@@ -26,9 +26,7 @@ def client(monkeypatch):
 
 
 def test_create_poll_and_csv(client):
-    r = client(
-        "POST", "/runs", json={"path": "gateway", "gateway_variant": "default", "stream": False}
-    )
+    r = client("POST", "/runs", json={"path": "apim-default", "stream": False})
     assert r.status_code == 202
     run_id = r.json()["run_id"]
     store = main._store
@@ -38,13 +36,13 @@ def test_create_poll_and_csv(client):
         {"kind": "tool", "agent": "network", "total_s": 0.2},
     ]  # fmt: skip
     got = client("GET", f"/runs/{run_id}").json()
-    assert got["status"] == "queued" and '"gateway_variant":"default"' in got["config_json"]
+    assert got["status"] == "queued" and '"path":"apim-default"' in got["config_json"]
     assert (
         got["live_summary"]["max_longest_gap_s"] == 90.0 and got["live_summary"]["llm_calls"] == 1
     )
     assert client("GET", "/runs").json()[0]["id"] == run_id
     csv_text = client("GET", f"/runs/{run_id}/calls.csv").text
-    assert csv_text.splitlines()[0].startswith("run_id,ts_utc,kind") and "planner" in csv_text
+    assert csv_text.splitlines()[0].startswith("ts_utc,run_id,label") and "planner" in csv_text
 
 
 def test_validation_and_missing(client):

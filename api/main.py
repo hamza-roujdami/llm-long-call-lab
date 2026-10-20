@@ -18,25 +18,24 @@ from api.store import MemoryStore
 app = FastAPI(title="apim-timeout-lab api")
 
 CALL_COLUMNS = [
-    "run_id", "ts_utc", "kind", "round", "agent", "turn", "attempt", "path", "gateway_variant", "stream", "api",
-    "reasoning_effort", "http_status", "outcome", "error_type", "error_detail", "ttfh_s", "ttfb_s",
-    "longest_gap_s", "last_chunk_s", "total_s", "chunks", "input_chars", "prompt_tokens",
-    "completion_tokens", "reasoning_tokens", "client_request_id", "request_ids",
+    "ts_utc", "run_id", "label", "round", "agent", "turn", "attempt", "kind", "path", "stream",
+    "input_bytes", "http_status", "outcome", "error_type", "error_detail",
+    "ttfh_s", "ttfb_s", "ttft_s", "longest_gap_s", "last_chunk_s", "tail_silence_s", "total_s",
+    "chunks", "bytes", "prompt_tokens", "completion_tokens", "reasoning_tokens",
+    "request_ids", "client_request_id",
 ]  # fmt: skip
 
 
 class RunRequest(BaseModel):
     """Mirrors worker.config.RunConfig (validated again by the worker)."""
 
-    path: Literal["direct", "gateway"] = "direct"
-    gateway_variant: Literal["default", "stream"] = "stream"
+    path: Literal["direct", "apim-default", "apim-stream"] = "direct"
     stream: bool = True
-    api: Literal["responses", "chat"] = "responses"
     reasoning_effort: Literal["none", "minimal", "low", "medium", "high"] = "high"
     fact_tokens: int = Field(80_000, ge=1_000, le=400_000)
     section_fact_tokens: int = Field(20_000, ge=1_000, le=100_000)
     rounds: int = Field(1, ge=1, le=20)
-    max_tool_turns: int = Field(2, ge=0, le=5)
+    max_tool_calls: int = Field(3, ge=0, le=10)
     max_output_tokens: int = Field(16_000, ge=256, le=128_000)
     depth: Literal["normal", "exhaustive"] = "normal"
     note: str = Field("", max_length=200)
@@ -78,6 +77,7 @@ def summarise(calls: list[dict[str, Any]]) -> dict[str, Any]:
         "llm_calls": len(llm),
         "failed_calls": sum(1 for c in llm if c.get("outcome") != "completed"),
         "max_ttfb_s": peak("ttfb_s"),
+        "max_ttft_s": peak("ttft_s"),
         "max_longest_gap_s": peak("longest_gap_s"),
         "max_call_total_s": peak("total_s"),
         "prompt_tokens": sum(c.get("prompt_tokens") or 0 for c in llm),

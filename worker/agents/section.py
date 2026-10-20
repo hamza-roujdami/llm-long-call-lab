@@ -1,5 +1,3 @@
-from worker.agents.base import Agent
-
 _SCHEMA = (
     'Reply with ONE JSON object only: {"section": string, "summary": string, '
     '"tables":[{"title":string,"columns":[string],"rows":[[string]]}], '
@@ -14,17 +12,11 @@ _FOCUS = {
     "compute": "clusters, workload placement, datastores and backup tiers",
 }
 
-
-def _make(topic: str) -> Agent:
-    return Agent(
-        name=topic,
-        use_search=True,
-        system=(
-            f"You are the {topic} section agent writing the low-level design section on {_FOCUS[topic]}. "
-            "You receive the planner's instructions for your section and the relevant facts[]. "
-            "Produce concise tables and findings; flag inconsistencies as issues. " + _SCHEMA
-        ),
+SECTION_INSTRUCTIONS = {
+    topic: (
+        f"You are the {topic} section agent writing the low-level design section on {focus}. "
+        "You receive the planner's instructions for your section and the relevant facts[]. "
+        "Produce concise tables and findings; flag inconsistencies as issues. " + _SCHEMA
     )
-
-
-SECTION_AGENTS = {t: _make(t) for t in _FOCUS}
+    for topic, focus in _FOCUS.items()
+}

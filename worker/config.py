@@ -9,6 +9,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_FACTS = ROOT / "data" / "synthetic_docs" / "facts.jsonl"
 
+# The three network paths under test.
+Path3 = Literal["direct", "apim-default", "apim-stream"]
+PATHS: tuple[Path3, ...] = ("direct", "apim-default", "apim-stream")
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
@@ -19,6 +23,7 @@ class Settings(BaseSettings):
 
     api_url: str = ""  # internal URL of the api, which holds run state
     internal_token: str = ""
+
     foundry_endpoint: str = ""  # https://<name>.openai.azure.com
     apim_url: str = ""  # https://<apim>.azure-api.net
     apim_key: str = ""
@@ -26,11 +31,11 @@ class Settings(BaseSettings):
     search_endpoint: str = ""
     search_index: str = "design-pages"
 
-    # Test/local only: send "direct" calls here instead of Foundry (e.g. the fake model).
-    direct_base_url_override: str = ""
-    direct_key_override: str = ""
+    # Tests only: send every call to this OpenAI-compatible base URL (the fake model).
+    llm_base_url_override: str = ""
 
-    # Retry policy: PLACEHOLDER defaults (single attempt) until the customer's real settings are known.
+    # Retry policy (pipeline mode). PLACEHOLDER defaults until the customer's real settings are known.
+    # The matrix always uses a single attempt per call so every cut is visible.
     llm_max_attempts: int = 1
     llm_retry_backoff_s: float = 5.0
     llm_read_timeout_s: float = (
@@ -41,20 +46,16 @@ class Settings(BaseSettings):
 
 
 class RunConfig(BaseModel):
-    path: Literal["direct", "gateway"] = "direct"
-    gateway_variant: Literal["default", "stream"] = "stream"  # APIM config A (default) / B (stream)
+    path: Path3 = "direct"
     stream: bool = True
-    api: Literal["responses", "chat"] = "responses"  # chat rejects tools + reasoning on GPT-6 Sol
-    reasoning_effort: str = "high"
+    reasoning_effort: Literal["none", "minimal", "low", "medium", "high"] = "high"
     fact_tokens: int = (
         80_000  # facts[] size (chars/4 estimate); real tokens are ~1.25x, so 80K ~ 100K
     )
     section_fact_tokens: int = 20_000
     rounds: int = 1  # repeat the whole pipeline to stretch a run to 20-30 minutes
-    max_tool_turns: int = 2
+    max_tool_calls: int = 3  # per section agent
     max_output_tokens: int = 16_000
+    depth: Literal["normal", "exhaustive"] = "normal"  # exhaustive: planner checks every fact
     agents: list[str] = ["cover", "network", "addressing", "compute"]
-    depth: Literal["normal", "exhaustive"] = (
-        "normal"  # exhaustive: planner checks every fact (long call)
-    )
     note: str = ""

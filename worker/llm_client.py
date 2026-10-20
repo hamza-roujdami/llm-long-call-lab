@@ -1,18 +1,27 @@
-"""LLM client with per-call telemetry. Path: direct (Foundry) | gateway (APIM); stream on/off;
-API: Responses (default) | Chat Completions.
+"""The only place that talks to the model.
 
-Every attempt (including retries) produces one record with: time to response headers, time to
-first byte/chunk, longest silent gap on the connection, total time, HTTP status, tokens and
-correlation ids. The SDK's own retries are disabled so that retry behaviour is explicit and visible.
+* `Model` builds an OpenAI client for one of three paths (direct | apim-default | apim-stream) whose
+  HTTP transport times every call at the wire level: time to response headers, time to first body
+  byte, time to first token, longest silent gap between chunks, total time, HTTP status, request IDs
+  and token usage. One record per HTTP attempt, whatever sits on top (plain call or an agent loop).
+* `call_model()` is the plain one-shot call used by the matrix.
+* `Model.agent_client()` hands the same instrumented client to Microsoft Agent Framework.
 
-Note: GPT-6 Sol rejects function tools together with reasoning_effort on /chat/completions
-(observed, HTTP 400), so tool-using agents need the Responses API.
+SDK retries are disabled. Retries (only when LLM_MAX_ATTEMPTS > 1) happen in the transport, before
+any body byte was delivered, and every attempt is its own record. No TCP keepalive is configured:
+idle connections stay idle, which is exactly what the lab measures.
+
+GPT-6 Sol rejects function tools together with reasoning_effort on /chat/completions (observed,
+HTTP 400), so this client uses the Responses API only.
 """
 
 import asyncio
+import json
+import re
 import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -21,8 +30,9 @@ from typing import Any
 import httpx
 import openai
 
-from worker.config import RunConfig, Settings
+from worker.config import Settings
 
+FOUNDRY_SCOPE = "https://cognitiveservices.azure.com/.default"
 ID_HEADERS = (
     "x-request-id",
     "apim-request-id",
@@ -30,98 +40,286 @@ ID_HEADERS = (
     "request-id",
     "x-ms-client-request-id",
     "x-ms-region",
-    "x-mock-request-id",
 )
 RETRYABLE_STATUS = {408, 409, 429, 500, 502, 503, 504}
-FOUNDRY_SCOPE = "https://cognitiveservices.azure.com/.default"
+TOKEN_MARKERS = (b"output_text.delta", b"function_call_arguments.delta")
+COMPLETION_MARKERS = (b"response.completed", b"response.failed", b"response.incomplete")
+TAIL_BYTES = 16384
 
 Recorder = Callable[[dict[str, Any]], Awaitable[None]]
 
 
-@dataclass
-class _Attempt:
-    t0: float = 0.0
-    t_headers: float | None = None
-    status: int | None = None
-    headers: dict[str, str] = field(default_factory=dict)
-
-
-_current: ContextVar[_Attempt | None] = ContextVar("llm_attempt", default=None)
-
-
-async def _on_response(resp: httpx.Response) -> None:
-    a = _current.get()
-    if a is not None and a.t_headers is None:  # headers are in; the body has not been read yet
-        a.t_headers = time.monotonic()
-        a.status = resp.status_code
-        a.headers = {k.lower(): v for k, v in resp.headers.items()}
+async def _noop(_: dict[str, Any]) -> None:
+    return None
 
 
 @dataclass
-class ChatResult:
-    content: str = ""
-    tool_calls: list[dict[str, Any]] = field(default_factory=list)
-    finish_reason: str = ""
-    response_id: str = ""
+class CallContext:
+    run_id: str = ""
+    label: str = ""
+    agent: str = ""
+    round_no: int = 1
+    path: str = ""
+    stream: bool = False
+    turn: int = 0
+    records: list[dict[str, Any]] = field(default_factory=list)
 
 
-@dataclass
-class _Usage:
-    prompt: int | None = None
-    completion: int | None = None
-    reasoning: int | None = None
+_ctx: ContextVar[CallContext | None] = ContextVar("call_ctx", default=None)
 
 
-class LLMCallError(RuntimeError):
-    pass
+@contextmanager
+def call_context(**kw: Any) -> Iterator[CallContext]:
+    ctx = CallContext(**kw)
+    token = _ctx.set(ctx)
+    try:
+        yield ctx
+    finally:
+        _ctx.reset(token)
+
+
+def current_context() -> CallContext:
+    return _ctx.get() or CallContext()
 
 
 def longest_gap(points: list[float]) -> float | None:
     return max((b - a for a, b in zip(points, points[1:], strict=False)), default=None)
 
 
-def _is_retryable(e: BaseException) -> bool:
-    if isinstance(e, openai.APIStatusError):
-        return e.status_code in RETRYABLE_STATUS
-    return isinstance(e, openai.APIConnectionError | httpx.TransportError | asyncio.TimeoutError)
+_USAGE = re.compile(r'"usage"\s*:\s*\{')
 
 
-def _flat_tool(spec: dict[str, Any]) -> dict[str, Any]:
-    """Chat-style {"type":"function","function":{...}} -> Responses-style flat function tool."""
-    return {"type": "function", **spec["function"]}
+def parse_usage(tail: bytes) -> dict[str, int | None]:
+    """Last non-null `usage` object in the tail of a response body (JSON or SSE)."""
+    s = tail.decode("utf-8", "ignore")
+    last = None
+    for m in _USAGE.finditer(s):
+        last = m
+    if last is None:
+        return {}
+    try:
+        obj, _ = json.JSONDecoder().raw_decode(s[last.end() - 1 :])
+    except ValueError:
+        return {}
+    details = obj.get("output_tokens_details") or obj.get("completion_tokens_details") or {}
+    return {
+        "prompt_tokens": obj.get("input_tokens", obj.get("prompt_tokens")),
+        "completion_tokens": obj.get("output_tokens", obj.get("completion_tokens")),
+        "reasoning_tokens": details.get("reasoning_tokens"),
+    }
 
 
-class LLMClient:
+def _ids(headers: httpx.Headers) -> str:
+    return ";".join(f"{h}={headers[h]}" for h in ID_HEADERS if h in headers)
+
+
+class _TimedStream(httpx.AsyncByteStream):
+    def __init__(
+        self,
+        inner: httpx.AsyncByteStream,
+        rec: dict[str, Any],
+        ctx: CallContext,
+        recorder: Recorder,
+        t0: float,
+        t_headers: float,
+        want_stream: bool,
+    ) -> None:
+        self.inner, self.rec, self.ctx, self.recorder = inner, rec, ctx, recorder
+        self.t0, self.t_headers, self.want_stream = t0, t_headers, want_stream
+        self.times: list[float] = []
+        self.t_token: float | None = None
+        self.nbytes = 0
+        self.tail = b""
+        self.prev = b""
+        self.done = False
+
+    async def __aiter__(self):
+        try:
+            async for chunk in self.inner:
+                if chunk:
+                    now = time.monotonic()
+                    self.times.append(now)
+                    self.nbytes += len(chunk)
+                    if self.t_token is None and any(m in self.prev + chunk for m in TOKEN_MARKERS):
+                        self.t_token = now
+                    self.prev = chunk[-64:]
+                    self.tail = (self.tail + chunk)[-TAIL_BYTES:]
+                yield chunk
+        except BaseException as e:  # noqa: BLE001 - includes cancellation and consumer abort
+            await self._finish(e)
+            raise
+        await self._finish(None)
+
+    async def aclose(self) -> None:
+        await self._finish(GeneratorExit())  # closed before the body was fully read
+        await self.inner.aclose()
+
+    async def _finish(self, exc: BaseException | None) -> None:
+        if self.done:
+            return
+        self.done = True
+        end = time.monotonic()
+        r, t0 = self.rec, self.t0
+        r["total_s"] = round(end - t0, 3)
+        r["chunks"] = len(self.times)
+        r["bytes"] = self.nbytes
+        if self.times:
+            r["ttfb_s"] = round(self.times[0] - t0, 3)
+            gap = longest_gap([self.t_headers, *self.times])
+            r["longest_gap_s"] = round(gap, 3) if gap is not None else None
+            r["last_chunk_s"] = round(self.times[-1] - t0, 3)
+            r["tail_silence_s"] = round(end - self.times[-1], 3)
+        else:
+            r["tail_silence_s"] = round(end - self.t_headers, 3)
+        if self.t_token is not None:
+            r["ttft_s"] = round(self.t_token - t0, 3)
+        r.update({k: v for k, v in parse_usage(self.tail).items() if v is not None})
+        status = r.get("http_status") or 0
+        if not 200 <= status < 300:
+            r["outcome"] = "http_error"
+            r["error_detail"] = self.tail.decode("utf-8", "ignore")[:300]
+        elif exc is not None:
+            aborted = isinstance(exc, GeneratorExit | asyncio.CancelledError)
+            r["outcome"] = "aborted" if aborted else "truncated"
+            r["error_type"], r["error_detail"] = type(exc).__name__, str(exc)[:300]
+        elif self.want_stream and not any(m in self.tail for m in COMPLETION_MARKERS):
+            r["outcome"] = "truncated"
+            r["error_type"] = "StreamEndedWithoutCompletion"
+        else:
+            r["outcome"] = "completed"
+        await _emit(self.recorder, self.ctx, r)
+
+
+async def _emit(recorder: Recorder, ctx: CallContext, rec: dict[str, Any]) -> None:
+    ctx.records.append(rec)
+    await recorder(rec)
+
+
+class TimedTransport(httpx.AsyncBaseTransport):
+    def __init__(
+        self,
+        inner: httpx.AsyncBaseTransport,
+        recorder: Recorder,
+        max_attempts: int = 1,
+        backoff_s: float = 5.0,
+    ) -> None:
+        self.inner, self.recorder = inner, recorder
+        self.max_attempts, self.backoff_s = max(1, max_attempts), backoff_s
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        ctx = _ctx.get() or CallContext()
+        ctx.turn += 1
+        try:
+            want_stream = bool(json.loads(request.content).get("stream"))
+        except (ValueError, httpx.RequestNotRead):
+            want_stream = False
+        for attempt in range(1, self.max_attempts + 1):
+            client_request_id = str(uuid.uuid4())
+            request.headers["x-ms-client-request-id"] = client_request_id
+            rec: dict[str, Any] = {
+                "ts_utc": datetime.now(UTC).isoformat(timespec="seconds"),
+                "run_id": ctx.run_id,
+                "label": ctx.label,
+                "round": ctx.round_no,
+                "agent": ctx.agent,
+                "turn": ctx.turn,
+                "attempt": attempt,
+                "kind": "llm",
+                "path": ctx.path,
+                "stream": want_stream,
+                "input_bytes": len(request.content),
+                "client_request_id": client_request_id,
+            }
+            t0 = time.monotonic()
+            try:
+                resp = await self.inner.handle_async_request(request)
+            except Exception as e:
+                rec.update(
+                    outcome="error",
+                    error_type=type(e).__name__,
+                    error_detail=str(e)[:300],
+                    total_s=round(time.monotonic() - t0, 3),
+                )
+                await _emit(self.recorder, ctx, rec)
+                if attempt < self.max_attempts and isinstance(e, httpx.TransportError):
+                    await asyncio.sleep(self.backoff_s * attempt)
+                    continue
+                raise
+            t_headers = time.monotonic()
+            rec["http_status"] = resp.status_code
+            rec["ttfh_s"] = round(t_headers - t0, 3)
+            rec["request_ids"] = _ids(resp.headers)
+            if resp.status_code in RETRYABLE_STATUS and attempt < self.max_attempts:
+                detail = b"".join([c async for c in resp.stream])[:300]
+                await resp.stream.aclose()
+                rec.update(
+                    outcome="http_error",
+                    error_detail=detail.decode("utf-8", "ignore"),
+                    total_s=round(time.monotonic() - t0, 3),
+                )
+                await _emit(self.recorder, ctx, rec)
+                await asyncio.sleep(self.backoff_s * attempt)
+                continue
+            stream = _TimedStream(resp.stream, rec, ctx, self.recorder, t0, t_headers, want_stream)
+            return httpx.Response(
+                resp.status_code,
+                headers=resp.headers,
+                stream=stream,
+                extensions=resp.extensions,
+                request=request,
+            )
+        raise RuntimeError("unreachable")
+
+
+@dataclass
+class CallResult:
+    text: str = ""
+    record: dict[str, Any] = field(default_factory=dict)
+    error: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return not self.error and self.record.get("outcome") == "completed"
+
+
+class Model:
     def __init__(
         self,
         st: Settings,
-        cfg: RunConfig,
-        run_id: str,
-        recorder: Recorder,
-        credential=None,
+        path: str,
+        recorder: Recorder = _noop,
+        *,
+        max_attempts: int | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
+        run_id: str = "",
     ) -> None:
-        self.st, self.cfg, self.run_id, self.record = st, cfg, run_id, recorder
+        self.st, self.path, self.run_id = st, path, run_id
+        self._credential = None
         headers: dict[str, str] = {}
-        api_key: str | Callable[[], Awaitable[str]]
-        if st.direct_base_url_override and cfg.path == "direct":
-            base_url = st.direct_base_url_override
-            api_key = "unused"
-            headers["x-mock-key"] = st.direct_key_override
-        elif cfg.path == "direct":
-            from azure.identity.aio import get_bearer_token_provider
+        api_key: Any = "unused"
+        if st.llm_base_url_override:
+            base_url = st.llm_base_url_override
+        elif path == "direct":
+            from azure.identity.aio import DefaultAzureCredential, get_bearer_token_provider
 
+            self._credential = (
+                DefaultAzureCredential()
+            )  # AZURE_CLIENT_ID picks the managed identity
             base_url = f"{st.foundry_endpoint.rstrip('/')}/openai/v1/"
-            api_key = get_bearer_token_provider(credential, FOUNDRY_SCOPE)
+            api_key = get_bearer_token_provider(self._credential, FOUNDRY_SCOPE)
         else:
-            base_url = f"{st.apim_url.rstrip('/')}/llm-{cfg.gateway_variant}"
-            api_key = "unused"  # APIM authenticates to Foundry itself; callers use the APIM key
-            headers["api-key"] = st.apim_key
-            headers["Ocp-Apim-Subscription-Key"] = st.apim_key
+            variant = path.removeprefix("apim-")
+            base_url = f"{st.apim_url.rstrip('/')}/llm-{variant}"
+            # APIM authenticates to Foundry itself; callers only present the APIM subscription key.
+            headers = {"api-key": st.apim_key, "Ocp-Apim-Subscription-Key": st.apim_key}
+        timed = TimedTransport(
+            transport or httpx.AsyncHTTPTransport(retries=0),
+            recorder,
+            max_attempts=st.llm_max_attempts if max_attempts is None else max_attempts,
+            backoff_s=st.llm_retry_backoff_s,
+        )
         http = httpx.AsyncClient(
-            timeout=httpx.Timeout(st.llm_read_timeout_s, connect=30),
-            event_hooks={"response": [_on_response]},
-            transport=transport,
+            transport=timed, timeout=httpx.Timeout(st.llm_read_timeout_s, connect=30)
         )
         self.client = openai.AsyncOpenAI(
             base_url=base_url,
@@ -131,254 +329,75 @@ class LLMClient:
             default_headers=headers,
         )
 
+    def agent_client(self):
+        """Microsoft Agent Framework chat client (Responses API) over the instrumented HTTP client."""
+        from agent_framework.openai import OpenAIChatClient
+
+        return OpenAIChatClient(model=self.st.model, async_client=self.client)
+
+    async def call(
+        self,
+        prompt: str,
+        *,
+        system: str | None = None,
+        stream: bool = False,
+        reasoning_effort: str = "high",
+        max_output_tokens: int,
+        label: str = "",
+        agent: str = "call_model",
+    ) -> CallResult:
+        """One model call. Never raises: failures are data and come back in the result."""
+        items: list[dict[str, Any]] = []
+        if system:
+            items.append({"role": "developer", "content": system})
+        items.append({"role": "user", "content": prompt})
+        kwargs: dict[str, Any] = {
+            "model": self.st.model,
+            "input": items,
+            "max_output_tokens": max_output_tokens,
+            "store": False,
+        }
+        if reasoning_effort and reasoning_effort != "none":
+            kwargs["reasoning"] = {"effort": reasoning_effort}
+        text: list[str] = []
+        error = ""
+        with call_context(
+            run_id=self.run_id, label=label, agent=agent, path=self.path, stream=stream
+        ) as ctx:
+            try:
+                if stream:
+                    events = await self.client.responses.create(**kwargs, stream=True)
+                    async for ev in events:
+                        if ev.type == "response.output_text.delta":
+                            text.append(ev.delta)
+                        elif ev.type in ("response.failed", "response.incomplete", "error"):
+                            raise RuntimeError(f"stream ended with {ev.type}")
+                else:
+                    resp = await self.client.responses.create(**kwargs)
+                    text.append(resp.output_text)
+            except Exception as e:  # noqa: BLE001
+                error = f"{type(e).__name__}: {e}"[:300]
+        rec = ctx.records[-1] if ctx.records else {"outcome": "error", "error_detail": error}
+        return CallResult("".join(text), rec, error)
+
     async def aclose(self) -> None:
         await self.client.close()
-
-    def conversation(self, agent: str, system: str, round_no: int = 1) -> "Conversation":
-        return Conversation(self, agent, system, round_no)
-
-    async def _attempts(
-        self,
-        base: dict[str, Any],
-        runner: Callable[[dict[str, Any], list[float], _Usage], Awaitable[ChatResult]],
-    ) -> ChatResult:
-        last: Exception | None = None
-        for attempt in range(1, max(1, self.st.llm_max_attempts) + 1):
-            rec = {
-                **base,
-                "kind": "llm",
-                "run_id": self.run_id,
-                "ts_utc": datetime.now(UTC).isoformat(timespec="seconds"),
-                "attempt": attempt,
-                "path": self.cfg.path,
-                "gateway_variant": self.cfg.gateway_variant if self.cfg.path == "gateway" else "",
-                "stream": self.cfg.stream,
-                "api": self.cfg.api,
-                "reasoning_effort": self.cfg.reasoning_effort,
-                "client_request_id": str(uuid.uuid4()),
-            }
-            try:
-                res = await self._instrumented(rec, runner)
-                rec["outcome"] = "completed"
-                await self.record(rec)
-                return res
-            except Exception as e:  # noqa: BLE001 - every failure mode is data
-                last = e
-                rec["outcome"] = (
-                    "truncated" if rec.get("http_status") == 200 and rec.get("chunks") else "error"
-                )
-                if isinstance(e, openai.APIStatusError):
-                    rec["http_status"] = e.status_code
-                rec["error_type"] = type(e).__name__
-                rec["error_detail"] = str(e)[:300]
-                await self.record(rec)
-                if attempt < self.st.llm_max_attempts and _is_retryable(e):
-                    await asyncio.sleep(self.st.llm_retry_backoff_s * attempt)
-                    continue
-                break
-        raise LLMCallError(f"{base['agent']}: {type(last).__name__}: {last}") from last
-
-    async def _instrumented(self, rec, runner) -> ChatResult:
-        a = _Attempt(t0=time.monotonic())
-        token = _current.set(a)
-        chunk_times: list[float] = []
-        usage = _Usage()
-        try:
-            return await runner(rec, chunk_times, usage)
-        finally:
-            end = time.monotonic()
-            _current.reset(token)
-            rec["http_status"] = a.status
-            rec["total_s"] = round(end - a.t0, 3)
-            rec["ttfh_s"] = round(a.t_headers - a.t0, 3) if a.t_headers else None
-            rec["chunks"] = len(chunk_times)
-            if chunk_times:
-                rec["ttfb_s"] = round(chunk_times[0] - a.t0, 3)
-                pts = ([a.t_headers] if a.t_headers else []) + chunk_times
-                gap = longest_gap(pts)
-                rec["longest_gap_s"] = round(gap, 3) if gap is not None else None
-                rec["last_chunk_s"] = round(chunk_times[-1] - a.t0, 3)
-            elif a.t_headers and not self.cfg.stream:
-                rec["ttfb_s"] = rec["ttfh_s"]
-            rec["request_ids"] = ";".join(
-                f"{h}={a.headers[h]}" for h in ID_HEADERS if h in a.headers
-            )
-            rec["prompt_tokens"] = usage.prompt
-            rec["completion_tokens"] = usage.completion
-            rec["reasoning_tokens"] = usage.reasoning
-
-    # ---- Chat Completions ----------------------------------------------------------------
-    async def chat_call(self, base, messages, tools) -> ChatResult:
-        async def run(rec, times: list[float], usage: _Usage) -> ChatResult:
-            kwargs: dict[str, Any] = {
-                "model": self.st.model,
-                "messages": messages,
-                "max_completion_tokens": self.cfg.max_output_tokens,
-                "extra_headers": {"x-ms-client-request-id": rec["client_request_id"]},
-            }
-            if self.cfg.reasoning_effort and self.cfg.reasoning_effort != "none":
-                kwargs["reasoning_effort"] = self.cfg.reasoning_effort
-            if tools:
-                kwargs["tools"] = tools
-            if not self.cfg.stream:
-                resp = await self.client.chat.completions.create(**kwargs)
-                choice = resp.choices[0]
-                self._chat_usage(resp.usage, usage)
-                return ChatResult(
-                    content=choice.message.content or "",
-                    tool_calls=[
-                        {"id": t.id, "name": t.function.name, "arguments": t.function.arguments}
-                        for t in (choice.message.tool_calls or [])
-                    ],
-                    finish_reason=choice.finish_reason or "",
-                )
-            stream = await self.client.chat.completions.create(
-                **kwargs, stream=True, stream_options={"include_usage": True}
-            )
-            content: list[str] = []
-            calls: dict[int, dict[str, str]] = {}
-            finish = ""
-            async for chunk in stream:
-                times.append(time.monotonic())
-                if chunk.usage:
-                    self._chat_usage(chunk.usage, usage)
-                for ch in chunk.choices:
-                    if ch.delta.content:
-                        content.append(ch.delta.content)
-                    for tc in ch.delta.tool_calls or []:
-                        c = calls.setdefault(tc.index, {"id": "", "name": "", "arguments": ""})
-                        c["id"] = tc.id or c["id"]
-                        if tc.function:
-                            c["name"] += tc.function.name or ""
-                            c["arguments"] += tc.function.arguments or ""
-                    finish = ch.finish_reason or finish
-            return ChatResult("".join(content), [calls[i] for i in sorted(calls)], finish)
-
-        return await self._attempts(base, run)
-
-    @staticmethod
-    def _chat_usage(u, out: _Usage) -> None:
-        if u is None:
-            return
-        out.prompt, out.completion = u.prompt_tokens, u.completion_tokens
-        out.reasoning = getattr(
-            getattr(u, "completion_tokens_details", None), "reasoning_tokens", None
-        )
-
-    # ---- Responses API -------------------------------------------------------------------
-    async def responses_call(self, base, input_items, tools, previous_id) -> ChatResult:
-        async def run(rec, times: list[float], usage: _Usage) -> ChatResult:
-            kwargs: dict[str, Any] = {
-                "model": self.st.model,
-                "input": input_items,
-                "max_output_tokens": self.cfg.max_output_tokens,
-                "store": True,  # lets follow-up turns send only tool outputs (previous_response_id)
-                "extra_headers": {"x-ms-client-request-id": rec["client_request_id"]},
-            }
-            if self.cfg.reasoning_effort and self.cfg.reasoning_effort != "none":
-                kwargs["reasoning"] = {"effort": self.cfg.reasoning_effort}
-            if tools:
-                kwargs["tools"] = [_flat_tool(t) for t in tools]
-            if previous_id:
-                kwargs["previous_response_id"] = previous_id
-            if not self.cfg.stream:
-                final = await self.client.responses.create(**kwargs)
-            else:
-                final = None
-                stream = await self.client.responses.create(**kwargs, stream=True)
-                async for ev in stream:
-                    times.append(time.monotonic())
-                    if ev.type == "response.completed":
-                        final = ev.response
-                    elif ev.type in ("response.failed", "response.incomplete", "error"):
-                        detail = getattr(getattr(ev, "response", None), "error", None) or getattr(
-                            ev, "message", ""
-                        )
-                        raise RuntimeError(f"stream ended with {ev.type}: {detail}"[:300])
-                if final is None:
-                    raise RuntimeError("stream ended without response.completed")
-            u = getattr(final, "usage", None)
-            if u is not None:
-                usage.prompt, usage.completion = u.input_tokens, u.output_tokens
-                usage.reasoning = getattr(
-                    getattr(u, "output_tokens_details", None), "reasoning_tokens", None
-                )
-            calls = [
-                {"id": it.call_id, "name": it.name, "arguments": it.arguments}
-                for it in final.output
-                if it.type == "function_call"
-            ]
-            text = "".join(
-                part.text
-                for it in final.output
-                if it.type == "message"
-                for part in it.content
-                if getattr(part, "type", "") == "output_text"
-            )
-            return ChatResult(text, calls, getattr(final, "status", "") or "", final.id)
-
-        return await self._attempts(base, run)
+        if self._credential is not None:
+            await self._credential.close()
 
 
-class Conversation:
-    """One agent's multi-turn exchange, independent of which API carries it."""
-
-    def __init__(self, llm: LLMClient, agent: str, system: str, round_no: int) -> None:
-        self.llm, self.agent, self.system, self.round_no = llm, agent, system, round_no
-        self.turn = 0
-        self.messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
-        self.prev_id: str | None = None
-        self.last: ChatResult | None = None
-
-    def _base(self, input_chars: int) -> dict[str, Any]:
-        return {
-            "round": self.round_no,
-            "agent": self.agent,
-            "turn": self.turn,
-            "input_chars": input_chars,
-        }
-
-    async def _send(self, new_items: list[dict[str, Any]], tools) -> ChatResult:
-        if self.llm.cfg.api == "chat":
-            self.messages += new_items
-            chars = sum(len(str(m.get("content") or "")) for m in self.messages)
-            res = await self.llm.chat_call(self._base(chars), self.messages, tools)
-        else:
-            items = new_items
-            if self.prev_id is None:
-                items = [{"role": "developer", "content": self.system}] + new_items
-            chars = sum(len(str(m.get("content") or m.get("output") or "")) for m in items)
-            res = await self.llm.responses_call(self._base(chars), items, tools, self.prev_id)
-            self.prev_id = res.response_id
-        self.turn += 1
-        self.last = res
-        return res
-
-    async def ask(self, user_text: str, tools=None) -> ChatResult:
-        return await self._send([{"role": "user", "content": user_text}], tools)
-
-    async def tool_results(self, results: list[tuple[str, str]], tools=None) -> ChatResult:
-        """results: (call_id, output) for each tool call in the previous assistant turn."""
-        assert self.last is not None
-        if self.llm.cfg.api == "chat":
-            self.messages.append(
-                {
-                    "role": "assistant",
-                    "content": self.last.content or None,
-                    "tool_calls": [
-                        {
-                            "id": t["id"],
-                            "type": "function",
-                            "function": {"name": t["name"], "arguments": t["arguments"]},
-                        }
-                        for t in self.last.tool_calls
-                    ],
-                }
-            )
-            new = [{"role": "tool", "tool_call_id": cid, "content": out} for cid, out in results]
-        else:
-            new = [
-                {"type": "function_call_output", "call_id": cid, "output": out}
-                for cid, out in results
-            ]
-        return await self._send(new, tools)
+async def call_model(
+    prompt: str,
+    *,
+    path: str = "direct",
+    stream: bool = False,
+    settings: Settings | None = None,
+    recorder: Recorder = _noop,
+    **kw: Any,
+) -> CallResult:
+    """call_model(prompt, path=direct|apim-default|apim-stream, stream=bool): one timed model call."""
+    m = Model(settings or Settings(), path, recorder, max_attempts=1)
+    try:
+        return await m.call(prompt, stream=stream, **kw)
+    finally:
+        await m.aclose()
