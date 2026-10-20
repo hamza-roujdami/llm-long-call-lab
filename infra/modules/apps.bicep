@@ -1,7 +1,8 @@
 // The app tier on the shared ACA environment:
 //   web    : Next.js UI, external ingress, basic-auth guard
 //   api    : FastAPI, internal ingress; POST /runs starts a worker Job execution
-//   worker : manual-trigger Job (orchestrator + agents), 2 h replica timeout
+//   worker : manual-trigger Job: the agent pipeline (started by the api) and the long-call matrix
+//            (`python -m worker.run_matrix`, started with az). 4 h replica timeout
 // One user-assigned identity is shared by all three (lab simplification; see README).
 param location string
 param envId string
@@ -67,7 +68,7 @@ resource worker 'Microsoft.App/jobs@2024-03-01' = {
     environmentId: envId
     configuration: {
       triggerType: 'Manual'
-      replicaTimeout: 7200
+      replicaTimeout: 14400
       replicaRetryLimit: 0
       manualTriggerConfig: { parallelism: 1, replicaCompletionCount: 1 }
       registries: registries

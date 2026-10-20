@@ -1,4 +1,4 @@
-// ACR (Basic) + one user-assigned identity with AcrPull, shared by the ACI mock and the ACA job.
+// ACR (Basic) + one user-assigned identity with AcrPull, shared by the three Container Apps resources.
 // Needs permission to create role assignments (Owner or User Access Administrator) on the RG.
 param acrName string
 param identityName string

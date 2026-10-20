@@ -1,5 +1,5 @@
 <!--
-  Config B for the Foundry (GPT-6 Sol) API: identical to policy-default.xml except the backend
+  Path 3 (config B): Foundry (GPT-6 Sol) API: identical to policy-default.xml except the backend
   section, which sets buffer-response="false" and an explicit 600 s timeout.
   `timeout` is the wait for response HEADERS; Learn says values above 240 s may not be honoured,
   so 600 is deliberate: we are testing what the platform does, not what the policy asks for.

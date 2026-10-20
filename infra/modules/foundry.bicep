@@ -1,4 +1,4 @@
-// Microsoft Foundry resource (AIServices) with a GPT-6 Sol deployment.
+// Microsoft Foundry resource (AIServices) with a GPT-6 Sol deployment (no project needed).
 // Local (key) auth is disabled: callers use Entra tokens (workers directly, APIM via its identity).
 param name string
 param location string
@@ -21,16 +21,7 @@ resource foundry 'Microsoft.CognitiveServices/accounts@2025-06-01' = {
     customSubDomainName: name
     publicNetworkAccess: 'Enabled'
     disableLocalAuth: true
-    allowProjectManagement: true
   }
-}
-
-resource project 'Microsoft.CognitiveServices/accounts/projects@2025-06-01' = {
-  parent: foundry
-  name: 'lab'
-  location: location
-  identity: { type: 'SystemAssigned' }
-  properties: {}
 }
 
 resource model 'Microsoft.CognitiveServices/accounts/deployments@2025-06-01' = {
@@ -40,7 +31,6 @@ resource model 'Microsoft.CognitiveServices/accounts/deployments@2025-06-01' = {
   properties: {
     model: { format: 'OpenAI', name: modelName, version: modelVersion }
   }
-  dependsOn: [project]
 }
 
 output name string = foundry.name

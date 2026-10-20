@@ -1,5 +1,5 @@
 <!--
-  Config A for the Foundry (GPT-6 Sol) API: NO explicit forward-request, so APIM's defaults apply
+  Path 2 (config A): Foundry (GPT-6 Sol) API: NO explicit forward-request, so APIM's defaults apply
   (timeout 300 s to response headers, buffer-response true).
   The only policy present is what is needed to reach Foundry at all: swap the caller's APIM key
   for APIM's own managed-identity token. Nothing else: no validate-content, caching, or body logging.

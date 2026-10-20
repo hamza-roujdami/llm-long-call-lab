@@ -1,9 +1,9 @@
 // apim-timeout-lab: resource-group-scoped deployment.
 //
-// Phase 1 (deployCompute=false): Log Analytics, ACR + identity, AI Search, Foundry (GPT-6 Sol),
-//   APIM (mock + Foundry APIs), ACA environment, data-plane roles.
+// Phase 1 (deployApps=false): Log Analytics, ACR + identity, AI Search, Foundry (GPT-6 Sol),
+//   APIM (two Foundry APIs: no policy / streaming policy), ACA environment, data-plane roles.
 //   Then build images with `az acr build` (see README).
-// Phase 2 (deployCompute=true): ACI fake model, probe Job, and the app tier (web, api, worker Job).
+// Phase 2 (deployApps=true): the app tier (web, api, worker Job).
 targetScope = 'resourceGroup'
 
 param location string = resourceGroup().location
@@ -17,7 +17,7 @@ param apimSku string = 'Developer'
 
 param apimPublisherEmail string
 param apimPublisherName string = 'apim-timeout-lab'
-param deployCompute bool = false
+param deployApps bool = false
 param imageTag string = 'latest'
 
 param modelName string = 'gpt-6-sol'
@@ -40,9 +40,6 @@ param llmMaxAttempts int = 1
 param llmRetryBackoffSeconds int = 5
 
 @secure()
-param mockApiKey string
-
-@secure()
 param labPassword string
 
 @secure()
@@ -54,8 +51,6 @@ var apimName = '${namePrefix}-apim-${suffix}'
 var lawName = '${namePrefix}-law-${suffix}'
 var searchName = '${namePrefix}-search-${suffix}'
 var foundryName = '${namePrefix}-fdy-${suffix}'
-var mockDnsLabel = '${namePrefix}-mock-${suffix}'
-var mockUrl = 'http://${mockDnsLabel}.${location}.azurecontainer.io:8000'
 
 module monitoring 'modules/monitoring.bicep' = {
   name: 'monitoring'
@@ -92,11 +87,9 @@ module apim 'modules/apim.bicep' = {
     publisherEmail: apimPublisherEmail
     publisherName: apimPublisherName
     sku: apimSku
-    backendUrl: mockUrl
     foundryName: foundry.outputs.name
     foundryEndpoint: foundry.outputs.endpoint
     logAnalyticsId: monitoring.outputs.id
-    mockApiKey: mockApiKey
   }
 }
 
@@ -113,34 +106,12 @@ module aca 'modules/aca.bicep' = {
   name: 'aca'
   params: {
     envName: '${namePrefix}-env-${suffix}'
-    jobName: '${namePrefix}-probe-${suffix}'
     location: location
     logAnalyticsName: monitoring.outputs.name
-    deployJob: deployCompute
-    image: '${registry.outputs.loginServer}/probe:${imageTag}'
-    registryServer: registry.outputs.loginServer
-    identityId: registry.outputs.identityId
-    mockBaseUrl: mockUrl
-    apimBaseUrl: apim.outputs.gatewayUrl
-    mockApiKey: mockApiKey
-    apimName: apim.outputs.name
   }
 }
 
-module mock 'modules/mock-aci.bicep' = if (deployCompute) {
-  name: 'mock'
-  params: {
-    name: '${namePrefix}-mock-${suffix}'
-    location: location
-    image: '${registry.outputs.loginServer}/mock:${imageTag}'
-    registryServer: registry.outputs.loginServer
-    identityId: registry.outputs.identityId
-    dnsLabel: mockDnsLabel
-    mockApiKey: mockApiKey
-  }
-}
-
-module apps 'modules/apps.bicep' = if (deployCompute) {
+module apps 'modules/apps.bicep' = if (deployApps) {
   name: 'apps'
   params: {
     location: location
@@ -169,12 +140,10 @@ module apps 'modules/apps.bicep' = if (deployCompute) {
 output acrName string = registry.outputs.acrName
 output apimName string = apim.outputs.name
 output apimGatewayUrl string = apim.outputs.gatewayUrl
-output mockUrl string = mockUrl
-output probeJobName string = '${namePrefix}-probe-${suffix}'
 output logAnalyticsName string = lawName
 output searchName string = search.outputs.name
 output searchEndpoint string = search.outputs.endpoint
 output foundryName string = foundry.outputs.name
 output foundryEndpoint string = foundry.outputs.endpoint
-output webUrl string = deployCompute ? apps!.outputs.webUrl : ''
-output workerJobName string = deployCompute ? apps!.outputs.workerJobName : ''
+output webUrl string = deployApps ? apps!.outputs.webUrl : ''
+output workerJobName string = deployApps ? apps!.outputs.workerJobName : ''

@@ -1,7 +1,7 @@
 // APIM (Developer or StandardV2 only; Consumption does not support long-running connections).
-// Four APIs:
-//   mock-stream / mock-buffered : in front of the fake model (timeout probe, matrix H1-H4)
-//   llm-default / llm-stream    : in front of Foundry GPT-6 Sol (config A = defaults, config B = streaming)
+// Two APIs in front of the Foundry GPT-6 Sol deployment (both authenticate with APIM's managed identity):
+//   llm-default : path 2, NO forward-request policy (APIM defaults)
+//   llm-stream  : path 3, forward-request timeout=600 buffer-response=false
 // Deliberately no API/service-level `diagnostics` resource: no request/response body logging.
 param name string
 param location string
@@ -11,13 +11,9 @@ param publisherName string
 @allowed(['Developer', 'StandardV2'])
 param sku string
 
-param backendUrl string
 param foundryName string
 param foundryEndpoint string
 param logAnalyticsId string
-
-@secure()
-param mockApiKey string
 
 var cognitiveServicesOpenAIUser = '5e0bd9bd-7b93-4f28-af87-19fc36ad61bd'
 
@@ -45,57 +41,6 @@ resource apimCallsFoundry 'Microsoft.Authorization/roleAssignments@2022-04-01' =
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', cognitiveServicesOpenAIUser)
   }
 }
-
-resource mockKey 'Microsoft.ApiManagement/service/namedValues@2024-05-01' = {
-  parent: apim
-  name: 'mock-key'
-  properties: {
-    displayName: 'mock-key'
-    secret: true
-    value: mockApiKey
-  }
-}
-
-var mockVariants = [
-  { key: 'stream', path: 'lab', policy: loadTextContent('../../apim/mock-stream.xml') }
-  { key: 'buffered', path: 'lab-buffered', policy: loadTextContent('../../apim/mock-buffered.xml') }
-]
-var mockOperations = ['silent', 'stream', 'gap']
-
-resource mockApis 'Microsoft.ApiManagement/service/apis@2024-05-01' = [
-  for v in mockVariants: {
-    parent: apim
-    name: 'mock-${v.key}'
-    properties: {
-      displayName: 'Mock model (${v.key})'
-      path: v.path
-      protocols: ['https']
-      serviceUrl: backendUrl
-      subscriptionRequired: true
-    }
-  }
-]
-
-resource mockOps 'Microsoft.ApiManagement/service/apis/operations@2024-05-01' = [
-  for i in range(0, length(mockVariants) * length(mockOperations)): {
-    parent: mockApis[i / length(mockOperations)]
-    name: mockOperations[i % length(mockOperations)]
-    properties: {
-      displayName: mockOperations[i % length(mockOperations)]
-      method: 'GET'
-      urlTemplate: '/${mockOperations[i % length(mockOperations)]}'
-    }
-  }
-]
-
-resource mockPolicies 'Microsoft.ApiManagement/service/apis/policies@2024-05-01' = [
-  for (v, i) in mockVariants: {
-    parent: mockApis[i]
-    name: 'policy'
-    properties: { format: 'rawxml', value: v.policy }
-    dependsOn: [mockKey]
-  }
-]
 
 var llmVariants = [
   { key: 'default', path: 'llm-default', policy: loadTextContent('../../apim/policy-default.xml') }
@@ -151,7 +96,7 @@ resource sub 'Microsoft.ApiManagement/service/subscriptions@2024-05-01' = {
     scope: '${apim.id}/apis'
     allowTracing: false
   }
-  dependsOn: [mockApis, llmApis]
+  dependsOn: [llmApis]
 }
 
 resource gatewayLogs 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {
