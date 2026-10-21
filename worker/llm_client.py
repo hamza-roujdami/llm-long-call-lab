@@ -31,6 +31,7 @@ import httpx
 import openai
 
 from worker.config import Settings
+from worker.tracing import annotate_span
 
 FOUNDRY_SCOPE = "https://cognitiveservices.azure.com/.default"
 ID_HEADERS = (
@@ -123,14 +124,19 @@ class _TimedStream(httpx.AsyncByteStream):
         t0: float,
         t_headers: float,
         want_stream: bool,
+        pacer: "TokenPacer | None" = None,
     ) -> None:
         self.inner, self.rec, self.ctx, self.recorder = inner, rec, ctx, recorder
+        self.pacer = pacer
         self.t0, self.t_headers, self.want_stream = t0, t_headers, want_stream
         self.times: list[float] = []
         self.t_token: float | None = None
         self.nbytes = 0
         self.tail = b""
         self.prev = b""
+        self.saw_completion = (
+            False  # a terminal event passed by (not only in the tail: it leads a huge event)
+        )
         self.done = False
 
     async def __aiter__(self):
@@ -142,6 +148,8 @@ class _TimedStream(httpx.AsyncByteStream):
                     self.nbytes += len(chunk)
                     if self.t_token is None and any(m in self.prev + chunk for m in TOKEN_MARKERS):
                         self.t_token = now
+                    if any(m in self.prev + chunk for m in COMPLETION_MARKERS):
+                        self.saw_completion = True
                     self.prev = chunk[-64:]
                     self.tail = (self.tail + chunk)[-TAIL_BYTES:]
                 yield chunk
@@ -174,25 +182,78 @@ class _TimedStream(httpx.AsyncByteStream):
         if self.t_token is not None:
             r["ttft_s"] = round(self.t_token - t0, 3)
         r.update({k: v for k, v in parse_usage(self.tail).items() if v is not None})
+        if self.pacer and r.get("prompt_tokens"):
+            self.pacer.observe(
+                (self.ctx.agent, self.ctx.round_no),
+                r["prompt_tokens"] + (r.get("completion_tokens") or 0),
+            )
         status = r.get("http_status") or 0
         if not 200 <= status < 300:
             r["outcome"] = "http_error"
             r["error_detail"] = self.tail.decode("utf-8", "ignore")[:300]
+        elif b"rate limit" in self.tail.lower():
+            r["outcome"] = "truncated"  # the error arrived inside a 200 stream
+            r["error_type"] = "RateLimit"
+            r["error_detail"] = self.tail.decode("utf-8", "ignore")[-300:]
         elif exc is not None:
             aborted = isinstance(exc, GeneratorExit | asyncio.CancelledError)
             r["outcome"] = "aborted" if aborted else "truncated"
             r["error_type"], r["error_detail"] = type(exc).__name__, str(exc)[:300]
-        elif self.want_stream and not any(m in self.tail for m in COMPLETION_MARKERS):
+        elif self.want_stream and not self.saw_completion:
             r["outcome"] = "truncated"
             r["error_type"] = "StreamEndedWithoutCompletion"
         else:
             r["outcome"] = "completed"
+        annotate_span(r)
         await _emit(self.recorder, self.ctx, r)
 
 
 async def _emit(recorder: Recorder, ctx: CallContext, rec: dict[str, Any]) -> None:
     ctx.records.append(rec)
     await recorder(rec)
+
+
+class TokenPacer:
+    """Client-side pacing for a tokens-per-minute quota (pipeline only; never used by the matrix).
+
+    Estimates a request's tokens from its body size and waits until the last `window_s` seconds have room,
+    so big multi-turn agents run slowly instead of failing with a rate-limit error. The wait happens BEFORE
+    a call's timers start, so it never counts as call latency.
+    """
+
+    def __init__(self, tokens_per_window: int, window_s: float = 60.0) -> None:
+        self.budget, self.window = tokens_per_window, window_s
+        self.events: list[tuple[float, int]] = []
+        self.context: dict[
+            tuple[str, int], int
+        ] = {}  # (agent, round) -> tokens of the conversation so far
+        self._lock = asyncio.Lock()
+
+    @staticmethod
+    def estimate(body: bytes) -> int:
+        return max(1, int(len(body) / 3.5))
+
+    def estimate_request(self, body: bytes, chain: tuple[str, int]) -> int:
+        """Tokens the service will count. A continuation (previous_response_id) sends only the new bytes but is
+        billed for the whole conversation, so add the context size observed on the previous turn of the chain."""
+        base = 0
+        if b"previous_response_id" in body:
+            base = self.context.get(chain, 0)
+        return base + self.estimate(body)
+
+    def observe(self, chain: tuple[str, int], context_tokens: int) -> None:
+        self.context[chain] = context_tokens
+
+    async def acquire(self, tokens: int) -> None:
+        while True:
+            async with self._lock:
+                now = time.monotonic()
+                self.events = [(t, n) for t, n in self.events if now - t < self.window]
+                if not self.events or sum(n for _, n in self.events) + tokens <= self.budget:
+                    self.events.append((now, tokens))
+                    return
+                wait = self.events[0][0] + self.window - now
+            await asyncio.sleep(max(wait, 0.05) + 0.05)
 
 
 class TimedTransport(httpx.AsyncBaseTransport):
@@ -202,8 +263,9 @@ class TimedTransport(httpx.AsyncBaseTransport):
         recorder: Recorder,
         max_attempts: int = 1,
         backoff_s: float = 5.0,
+        pacer: TokenPacer | None = None,
     ) -> None:
-        self.inner, self.recorder = inner, recorder
+        self.inner, self.recorder, self.pacer = inner, recorder, pacer
         self.max_attempts, self.backoff_s = max(1, max_attempts), backoff_s
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
@@ -214,6 +276,10 @@ class TimedTransport(httpx.AsyncBaseTransport):
         except (ValueError, httpx.RequestNotRead):
             want_stream = False
         for attempt in range(1, self.max_attempts + 1):
+            if self.pacer:
+                await self.pacer.acquire(
+                    self.pacer.estimate_request(request.content, (ctx.agent, ctx.round_no))
+                )
             client_request_id = str(uuid.uuid4())
             request.headers["x-ms-client-request-id"] = client_request_id
             rec: dict[str, Any] = {
@@ -260,7 +326,9 @@ class TimedTransport(httpx.AsyncBaseTransport):
                 await _emit(self.recorder, ctx, rec)
                 await asyncio.sleep(self.backoff_s * attempt)
                 continue
-            stream = _TimedStream(resp.stream, rec, ctx, self.recorder, t0, t_headers, want_stream)
+            stream = _TimedStream(
+                resp.stream, rec, ctx, self.recorder, t0, t_headers, want_stream, self.pacer
+            )
             return httpx.Response(
                 resp.status_code,
                 headers=resp.headers,
@@ -318,6 +386,9 @@ class Model:
             recorder,
             max_attempts=st.llm_max_attempts if max_attempts is None else max_attempts,
             backoff_s=st.llm_retry_backoff_s,
+            pacer=TokenPacer(st.llm_tpm_budget)
+            if st.llm_tpm_budget and max_attempts != 1
+            else None,
         )
         http = httpx.AsyncClient(
             transport=timed, timeout=httpx.Timeout(st.llm_read_timeout_s, connect=30)

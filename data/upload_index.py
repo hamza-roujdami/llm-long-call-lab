@@ -18,22 +18,24 @@ INDEX = "design-pages"
 INDEX_DEF = {
     "name": INDEX,
     "fields": [
-        {"name": "id", "type": "Edm.String", "key": True, "filterable": True},
+        {"name": "id", "type": "Edm.String", "key": True, "filterable": True, "retrievable": True},
         {
-            "name": "page",
+            "name": "page_number",
             "type": "Edm.Int32",
             "filterable": True,
             "sortable": True,
             "retrievable": True,
         },
+        {"name": "filename", "type": "Edm.String", "filterable": True, "retrievable": True},
+        {"name": "section_path", "type": "Edm.String", "searchable": True, "retrievable": True},
+        {"name": "chunk_type", "type": "Edm.String", "filterable": True, "retrievable": True},
         {
-            "name": "topic",
+            "name": "domain",
             "type": "Edm.String",
             "filterable": True,
             "facetable": True,
             "retrievable": True,
         },
-        {"name": "title", "type": "Edm.String", "searchable": True, "retrievable": True},
         {"name": "content", "type": "Edm.String", "searchable": True, "retrievable": True},
     ],
 }
@@ -68,8 +70,13 @@ def main() -> None:
 
     base = f"https://{args.search_name}.search.windows.net"
     headers = {"api-key": admin_key(args.search_name, args.resource_group, args.subscription)}
-    _, docs, _ = generate(pages=180, seed=42)  # same synthetic document the worker image generates
+    docs = [
+        {k: v for k, v in c.items() if k != "in_slice"} for c in generate()
+    ]  # same as the worker image
     with httpx.Client(headers=headers, timeout=60) as http:
+        http.delete(
+            f"{base}/indexes/{INDEX}?api-version={API}"
+        )  # schema changes need a fresh index
         r = http.put(f"{base}/indexes/{INDEX}?api-version={API}", json=INDEX_DEF)
         r.raise_for_status()
         for i in range(0, len(docs), 100):
@@ -80,7 +87,11 @@ def main() -> None:
             r.raise_for_status()
         r = http.post(
             f"{base}/indexes/{INDEX}/docs/search?api-version={API}",
-            json={"search": "BGP max-prefix", "top": 1, "select": "page,title"},
+            json={
+                "search": "VLAN segment CIDR",
+                "top": 1,
+                "select": "page_number,filename,section_path",
+            },
         )
         r.raise_for_status()
         print(

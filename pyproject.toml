@@ -19,6 +19,9 @@ dependencies = [
   "pydantic-settings>=2.6",
   "azure-identity>=1.19",
   "aiohttp>=3.10",
+  "azure-monitor-opentelemetry>=1.6",
+  "openpyxl>=3.1",
+  "python-docx>=1.1",
   "fastapi>=0.115",
   "uvicorn>=0.32",
 ]

@@ -1,7 +1,7 @@
 """ai_search tool: keyword search over the synthetic design document in Azure AI Search.
 
-Shape mirrors a typical RAG tool: ai_search(query, domain?, top?) returns whole page chunks with page
-number and section path. Exposed to Microsoft Agent Framework agents as a function tool.
+Shape mirrors a typical RAG tool: ai_search(query, domain?, top?) returns whole chunks with filename,
+page number, section path and chunk type. Exposed to Microsoft Agent Framework agents as a function tool.
 """
 
 import json
@@ -17,7 +17,7 @@ from worker.llm_client import Recorder, _noop, current_context
 
 SEARCH_SCOPE = "https://search.azure.com/.default"
 API_VERSION = "2024-07-01"
-DOMAINS = ("cover", "network", "addressing", "compute")
+DOMAINS = ("cover", "network", "addressing", "compute", "security")
 
 SearchFn = Callable[[str, str | None, int], Awaitable[str]]
 
@@ -33,20 +33,22 @@ class DocSearch:
         body: dict[str, Any] = {
             "search": query,
             "top": max(1, min(int(top), 10)),
-            "select": "page,topic,title,content",
+            "select": "id,page_number,filename,section_path,chunk_type,domain,content",
             "queryType": "simple",
         }
         if domain in DOMAINS:
-            body["filter"] = f"topic eq '{domain}'"
+            body["filter"] = f"domain eq '{domain}'"
         r = await self.http.post(self.url, json=body, headers={"Authorization": f"Bearer {token}"})
         r.raise_for_status()
         return json.dumps(
             [
                 {
-                    "page_number": h["page"],
-                    "section_path": h["title"],
-                    "domain": h["topic"],
-                    "chunk": h["content"][:1500],
+                    "id": h["id"],
+                    "filename": h["filename"],
+                    "page_number": h["page_number"],
+                    "section_path": h["section_path"],
+                    "chunk_type": h["chunk_type"],
+                    "content": h["content"],
                 }
                 for h in r.json().get("value", [])
             ]
@@ -62,15 +64,15 @@ def make_search_tool(search: SearchFn, recorder: Recorder = _noop, max_calls: in
     @tool(
         name="ai_search",
         description=(
-            "Search the high-level design document with Azure AI Search. Returns whole page chunks "
-            "with page_number and section_path. Use it to verify a detail or find supporting evidence."
+            "Search the whole high-level design with Azure AI Search. Returns whole chunks (tables "
+            "included) with filename, page_number and section_path. Use it to find what facts[] may be missing."
         ),
         max_invocations=max_calls,
     )
     async def ai_search(
         query: Annotated[str, Field(description="what to find, in plain words")],
         domain: Annotated[
-            str | None, Field(description="optional: cover|network|addressing|compute")
+            str | None, Field(description="optional: cover|network|addressing|compute|security")
         ] = None,
         top: Annotated[int, Field(description="results to return, 1-10 (default 5)")] = 5,
     ) -> str:

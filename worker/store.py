@@ -17,6 +17,7 @@ class Store(Protocol):
     async def update_run(self, run_id: str, **fields: Any) -> None: ...
     async def add_call(self, run_id: str, seq: int, rec: dict[str, Any]) -> None: ...
     async def put_output(self, run_id: str, data: dict[str, Any]) -> None: ...
+    async def put_file(self, run_id: str, name: str, data: bytes) -> None: ...
     async def close(self) -> None: ...
 
 
@@ -30,6 +31,7 @@ class MemoryStore:
         self.runs: dict[str, dict[str, Any]] = {}
         self.calls: dict[str, list[dict[str, Any]]] = {}
         self.outputs: dict[str, dict[str, Any]] = {}
+        self.files: dict[str, dict[str, bytes]] = {}
 
     async def get_run(self, run_id):
         return self.runs.get(run_id)
@@ -45,6 +47,9 @@ class MemoryStore:
 
     async def put_output(self, run_id, data):
         self.outputs[run_id] = data
+
+    async def put_file(self, run_id, name, data):
+        self.files.setdefault(run_id, {})[name] = data
 
     async def close(self) -> None:
         return None
@@ -86,6 +91,17 @@ class HttpStore:
 
     async def put_output(self, run_id, data):
         await self._send("PUT", f"/internal/runs/{run_id}/output", data)
+
+    async def put_file(self, run_id, name, data):
+        for attempt in range(3):
+            try:
+                r = await self._http.put(f"/internal/runs/{run_id}/files/{name}", content=data)
+                r.raise_for_status()
+                return
+            except Exception as e:  # noqa: BLE001 - artifacts must not fail the run
+                if attempt == 2:
+                    print(f"WARN store put_file {name} failed: {type(e).__name__}: {e}", flush=True)
+                await asyncio.sleep(1 + attempt)
 
     async def close(self) -> None:
         await self._http.aclose()

@@ -83,7 +83,16 @@ def test_matrix_cells_run_and_write_csv(live_fake, monkeypatch, tmp_path):
     monkeypatch.setenv("RESULTS_DIR", str(tmp_path))
     monkeypatch.setattr(run_matrix, "load_calibration", lambda: {"S": {"n_facts": 3}})
     args = run_matrix.parse_args(
-        ["--max-output-tokens", "100", "--confirm-spend", "--skip-calibration", "--prompts", "S"]
+        [
+            "--max-output-tokens",
+            "100",
+            "--confirm-spend",
+            "--skip-calibration",
+            "--prompts",
+            "S",
+            "--cooldown-s",
+            "0",
+        ]
     )
     assert run(run_matrix.amain(args)) == 0
     rows = (tmp_path / "runs.csv").read_text().splitlines()
@@ -99,3 +108,18 @@ def test_matrix_args_work_without_dashes():
     assert matrix_argv(["max-output-tokens=1000", "confirm-spend", "--repeat=2"]) == [
         "--max-output-tokens", "1000", "--confirm-spend", "--repeat", "2",
     ]  # fmt: skip
+
+
+def test_cooldown_spaces_consecutive_calls(live_fake, monkeypatch, tmp_path):
+    monkeypatch.setenv("LLM_BASE_URL_OVERRIDE", live_fake)
+    monkeypatch.setenv("RESULTS_DIR", str(tmp_path))
+    monkeypatch.setattr(run_matrix, "load_calibration", lambda: {"S": {"n_facts": 2}})
+    args = run_matrix.parse_args(
+        ["--max-output-tokens", "100", "--confirm-spend", "--skip-calibration", "--prompts", "S",
+         "--paths", "direct", "--streams", "off", "--repeat", "2", "--cooldown-s", "1.5"]
+    )  # fmt: skip
+    import time
+
+    t0 = time.monotonic()
+    assert run(run_matrix.amain(args)) == 0
+    assert time.monotonic() - t0 >= 1.4  # the second cell waited for the cooldown

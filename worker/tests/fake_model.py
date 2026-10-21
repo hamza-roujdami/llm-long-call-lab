@@ -17,9 +17,69 @@ from fastapi.responses import JSONResponse, StreamingResponse
 app = FastAPI()
 FIRST_DELAY = 0.0
 FAKE_TEXT = '{"fake": true}'
+FAKE_PLAN = json.dumps(
+    {
+        "engagement_id": "ENG-001",
+        "sections": [
+            {
+                "section_id": "s1",
+                "sheet_name": "Cover",
+                "sheet_type": "cover",
+                "owner_agent": "cover",
+                "order": 1,
+            },
+            {
+                "section_id": "s2",
+                "sheet_name": "Firewall rules",
+                "sheet_type": "firewall_rules",
+                "owner_agent": "network",
+                "order": 2,
+            },
+            {
+                "section_id": "s3",
+                "sheet_name": "Subnets",
+                "sheet_type": "subnets",
+                "owner_agent": "addressing",
+                "order": 3,
+            },
+        ],
+        "omitted_candidates": [
+            {"sheet_name": "Compute", "reason": "no compute segments in the fake"}
+        ],
+        "warnings": [],
+        "detected_vlans": [
+            {"id": "100", "name": "Core", "cidr": "10.0.0.0/24", "platform": "onprem"}
+        ],
+    }
+)
+FAKE_SHEETS = json.dumps(
+    {
+        "sheets": [
+            {
+                "section_id": "s",
+                "sheet_name": "Sheet",
+                "columns": ["a", "b"],
+                "rows": [["1", "2"]],
+                "notes": "p1",
+            }
+        ],
+        "issues": [],
+    }
+)
 
 
-def _response(model: str, tool_call: bool, status: str = "completed") -> dict:
+def _text_for(body: dict) -> str:
+    probe = json.dumps(body)[:6000]
+    if "planning agent" in probe:
+        return FAKE_PLAN
+    if "content agent" in probe:
+        return FAKE_SHEETS
+    return FAKE_TEXT
+
+
+def _response(
+    model: str, tool_call: bool, status: str = "completed", text: str = FAKE_TEXT
+) -> dict:
     if tool_call:
         output: list[dict] = [
             {
@@ -38,7 +98,7 @@ def _response(model: str, tool_call: bool, status: str = "completed") -> dict:
                 "id": "msg_1",
                 "role": "assistant",
                 "status": "completed",
-                "content": [{"type": "output_text", "text": FAKE_TEXT, "annotations": []}],
+                "content": [{"type": "output_text", "text": text, "annotations": []}],
             }
         ]
     return {
@@ -77,13 +137,14 @@ async def responses(request: Request):
     )
     tool_call = bool(body.get("tools")) and first_turn
     model = body.get("model", "fake")
+    text = _text_for(body)
     headers = {"x-request-id": uuid.uuid4().hex}
     if not body.get("stream"):
         await asyncio.sleep(delay)
-        return JSONResponse(_response(model, tool_call), headers=headers)
+        return JSONResponse(_response(model, tool_call, text=text), headers=headers)
 
     async def gen() -> AsyncIterator[bytes]:
-        final = _response(model, tool_call)
+        final = _response(model, tool_call, text=text)
         started = {**final, "status": "in_progress", "output": []}
         yield _sse({"type": "response.created", "sequence_number": 0, "response": started})
         yield _sse({"type": "response.in_progress", "sequence_number": 1, "response": started})
@@ -122,7 +183,7 @@ async def responses(request: Request):
                 content_index=0,
                 part=part,
             )
-            for piece in (FAKE_TEXT[:7], FAKE_TEXT[7:]):
+            for piece in (text[:7], text[7:]):
                 yield ev(
                     "response.output_text.delta",
                     item_id=item["id"],
@@ -136,14 +197,14 @@ async def responses(request: Request):
                 item_id=item["id"],
                 output_index=0,
                 content_index=0,
-                text=FAKE_TEXT,
+                text=text,
             )
             yield ev(
                 "response.content_part.done",
                 item_id=item["id"],
                 output_index=0,
                 content_index=0,
-                part={**part, "text": FAKE_TEXT},
+                part={**part, "text": text},
             )
             yield ev("response.output_item.done", output_index=0, item=item)
         yield ev("response.completed", response=final)

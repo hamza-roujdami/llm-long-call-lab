@@ -21,6 +21,7 @@ export default function Home() {
   const [runs, setRuns] = useState([]);
   const [sel, setSel] = useState(null);
   const [run, setRun] = useState(null);
+  const [files, setFiles] = useState({});
   const [error, setError] = useState("");
 
   const loadRuns = useCallback(async () => {
@@ -43,6 +44,10 @@ export default function Home() {
       const data = await r.json();
       setRun(data);
       if (data.status === "queued" || data.status === "running") setTimeout(tick, 3000);
+      else {
+        const f = await fetch(`/api/runs/${sel}/files`);
+        if (f.ok) setFiles(await f.json());
+      }
     };
     tick();
     return () => { stop = true; };
@@ -58,6 +63,7 @@ export default function Home() {
     if (!r.ok) return setError(`${r.status}: ${(await r.text()).slice(0, 300)}`);
     const { run_id } = await r.json();
     setRun(null);
+    setFiles({});
     setSel(run_id);
     loadRuns();
   }
@@ -141,6 +147,9 @@ export default function Home() {
               <p>
                 <a href={`/api/runs/${run.id}/calls.csv`}>calls.csv</a> ·{" "}
                 <a href={`/api/runs/${run.id}/output`} target="_blank">output.json</a>
+                {Object.keys(files).map((n) => (
+                  <span key={n}> · <a href={`/api/runs/${run.id}/files/${n}`}>{n}</a></span>
+                ))}
               </p>
               <div style={{ overflowX: "auto" }}>
                 <table style={{ borderCollapse: "collapse", fontSize: 13 }}>

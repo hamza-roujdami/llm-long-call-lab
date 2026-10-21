@@ -7,10 +7,10 @@ async function proxy(req, { params }) {
   const init = { method: req.method, headers: { "content-type": "application/json" }, cache: "no-store" };
   if (req.method !== "GET" && req.method !== "HEAD") init.body = await req.text();
   const r = await fetch(url, init);
-  return new Response(r.body, {
-    status: r.status,
-    headers: { "content-type": r.headers.get("content-type") || "application/json" },
-  });
+  const headers = { "content-type": r.headers.get("content-type") || "application/json" };
+  const disposition = r.headers.get("content-disposition");
+  if (disposition) headers["content-disposition"] = disposition;
+  return new Response(r.body, { status: r.status, headers });
 }
 
 export const dynamic = "force-dynamic";

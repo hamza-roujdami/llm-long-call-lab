@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_FACTS = ROOT / "data" / "synthetic_docs" / "facts.jsonl"
+DEFAULT_FACTS = ROOT / "data" / "synthetic_docs" / "hld.jsonl"
 
 # The three network paths under test.
 Path3 = Literal["direct", "apim-default", "apim-stream"]
@@ -38,11 +38,12 @@ class Settings(BaseSettings):
     # The matrix always uses a single attempt per call so every cut is visible.
     llm_max_attempts: int = 1
     llm_retry_backoff_s: float = 5.0
+    llm_tpm_budget: int = 0  # >0: pace requests to this many tokens per minute (pipeline only)
     llm_read_timeout_s: float = (
         3600.0  # longer than any scenario; the client must not be the limiter
     )
 
-    facts_path: str = str(DEFAULT_FACTS)
+    facts_path: str = str(DEFAULT_FACTS)  # the HLD chunks (hld.jsonl)
 
 
 class RunConfig(BaseModel):

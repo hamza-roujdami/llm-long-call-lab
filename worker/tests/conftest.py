@@ -14,18 +14,26 @@ from worker.tests import fake_model
 
 
 def _generate_facts() -> None:
-    """Synthetic facts are generated, not committed: build a small copy for the tests."""
+    """Synthetic HLD chunks are generated, not committed: build a small copy for the tests."""
     root = Path(__file__).resolve().parents[2]
     spec = importlib.util.spec_from_file_location(
         "gen", root / "data" / "generate_synthetic_docs.py"
     )
     gen = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(gen)
-    facts, _, _ = gen.generate(pages=20, seed=42)
-    path = Path(tempfile.mkdtemp()) / "facts.jsonl"
-    path.write_text("".join(json.dumps(f) + "\n" for f in facts))
+    chunks = gen.generate(slice_chunks=24, extra_chunks=6, seed=42)
+    path = Path(tempfile.mkdtemp()) / "hld.jsonl"
+    path.write_text("".join(json.dumps(c) + "\n" for c in chunks))
     os.environ["FACTS_PATH"] = str(path)
 
+
+# Hermetic: a developer's .env (retries, pacing, endpoints) must never change test behaviour.
+for _k, _v in {
+    "LLM_MAX_ATTEMPTS": "1", "LLM_RETRY_BACKOFF_S": "5", "LLM_TPM_BUDGET": "0", "LLM_BASE_URL_OVERRIDE": "",
+    "APIM_URL": "", "APIM_KEY": "", "FOUNDRY_ENDPOINT": "", "SEARCH_ENDPOINT": "",
+    "APPLICATIONINSIGHTS_CONNECTION_STRING": "",
+}.items():  # fmt: skip
+    os.environ[_k] = _v
 
 _generate_facts()
 

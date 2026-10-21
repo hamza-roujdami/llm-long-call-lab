@@ -1,11 +1,14 @@
-"""Generate a SYNTHETIC high-level design document and its facts[] list.
+"""Generate a SYNTHETIC high-level design (HLD) as search chunks. Everything is fictional (seeded RNG).
 
-Everything is fictional and produced from a seeded RNG (no real customer data). Output:
-  data/synthetic_docs/design_document.md   readable document, one section per page (git-ignored)
-  data/synthetic_docs/facts.jsonl          one fact per line (the planner payload source)
-  data/synthetic_docs/pages.jsonl          one search document per page (indexed in AI Search)
+The shape mirrors a typical RAG corpus: chunks of ~2,000 characters, each with a filename, page number,
+section path and type (prose | table | iac). Two groups:
+  in_slice=true   the "starting slice" the orchestrator puts in the planner's facts[] (~100K tokens)
+  in_slice=false  only reachable through the ai_search tool: the segment (VLAN) table, the cluster
+                  role table with host counts, the subscription table, and extra pages
 
-  python data/generate_synthetic_docs.py [--pages 180] [--seed 42]
+Output: data/synthetic_docs/hld.jsonl (git-ignored, generated at image build)
+
+  python data/generate_synthetic_docs.py [--slice 200] [--extra 120] [--seed 42]
 """
 
 import argparse
@@ -14,8 +17,22 @@ import random
 from pathlib import Path
 
 OUT = Path(__file__).parent / "synthetic_docs"
-FACTS_PER_PAGE = 9
-TOPIC_SHARE = {"cover": 0.07, "network": 0.35, "addressing": 0.30, "compute": 0.28}
+CHUNK_CHARS = 2000
+DOMAIN_SHARE = {
+    "cover": 0.07,
+    "network": 0.33,
+    "addressing": 0.27,
+    "compute": 0.25,
+    "security": 0.08,
+}
+TYPE_SHARE = {"prose": 0.6, "table": 0.3, "iac": 0.1}
+FILES = {
+    "cover": "HLD-00-Overview.docx",
+    "network": "HLD-10-Network.docx",
+    "addressing": "HLD-20-Addressing.docx",
+    "compute": "HLD-30-Compute.docx",
+    "security": "HLD-40-Security.docx",
+}
 TOPIC_TITLES = {
     "cover": [
         "Document control",
@@ -161,64 +178,167 @@ def cover_fact(r: random.Random) -> str:
     )
 
 
+def security_fact(r: random.Random) -> str:
+    return (
+        f"Certificate for {r.choice(APPS)}.{r.choice(SITES).lower()}.example is issued by the internal CA "
+        f"with key size {r.choice([2048, 3072, 4096])}, valid {r.choice([12, 24, 36])} months and renewed "
+        f"{r.choice([30, 45, 60])} days before expiry; owner {r.choice(OWNERS)}."
+    )
+
+
 MAKERS = {
     "network": network_fact,
     "addressing": addressing_fact,
     "compute": compute_fact,
     "cover": cover_fact,
+    "security": security_fact,
 }
 
 
-def generate(pages: int, seed: int) -> tuple[list[dict], list[dict], str]:
+def _table(header: list[str], rows: list[list[str]]) -> str:
+    lines = ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
+    lines += ["| " + " | ".join(str(c) for c in row) + " |" for row in rows]
+    return "\n".join(lines)
+
+
+def _prose(r: random.Random, domain: str) -> str:
+    out, size = [], 0
+    while size < CHUNK_CHARS:
+        t = MAKERS[domain](r)
+        out.append(t)
+        size += len(t) + 1
+    return " ".join(out)
+
+
+def _table_chunk(r: random.Random, domain: str) -> str:
+    rows: list[list[str]] = []
+    if domain == "network":
+        header = ["Rule", "Action", "Protocol/Port", "Source", "Destination", "Logging"]
+        while len(_table(header, rows)) < CHUNK_CHARS:
+            rows.append([f"FW-{r.randint(1000, 9999)}", r.choice(["permit", "deny"]),
+                         f"{r.choice(['tcp', 'udp'])}/{r.choice([443, 8443, 5432, 1433, 9092, 6379])}",
+                         _cidr(r, 24), _cidr(r, 26), r.choice(["full", "drop-only", "sampled"])])  # fmt: skip
+    elif domain == "compute":
+        header = ["Cluster", "Hosts", "Cores/host", "RAM GB/host", "Overcommit", "Storage policy"]
+        while len(_table(header, rows)) < CHUNK_CHARS:
+            rows.append([f"{r.choice(SITES)[:3].upper()}-{r.choice(ENVS).upper()}-{r.randint(1, 9)}",
+                         r.randint(4, 32), r.choice([64, 96, 128]), r.choice([512, 1024, 2048]),
+                         f"{r.choice([2, 3, 4])}:1", r.choice(["gold", "silver", "bronze"])])  # fmt: skip
+    elif domain == "security":
+        header = [
+            "Certificate",
+            "Issuer",
+            "Key size",
+            "Validity (months)",
+            "Renew before (days)",
+            "Owner",
+        ]
+        while len(_table(header, rows)) < CHUNK_CHARS:
+            rows.append([f"{r.choice(APPS)}.{r.choice(SITES).lower()}.example", "Internal CA",
+                         r.choice([2048, 3072, 4096]), r.choice([12, 24, 36]), r.choice([30, 45, 60]),
+                         r.choice(OWNERS)])  # fmt: skip
+    else:
+        header = ["Subnet", "CIDR", "Gateway", "DHCP", "Purpose", "Site"]
+        while len(_table(header, rows)) < CHUNK_CHARS:
+            rows.append([f"snet-{r.choice(TIERS)}-{r.randint(1, 40):02d}", _cidr(r, r.choice([24, 26])),
+                         ".1", r.choice(["off", "8h lease", "relay"]), r.choice(TIERS), r.choice(SITES)])  # fmt: skip
+    return _table(header, rows)
+
+
+def _iac_chunk(r: random.Random, domain: str) -> str:
+    lines: list[str] = []
+    if domain == "compute":
+        lines.append("vms:")
+        while sum(map(len, lines)) < CHUNK_CHARS:
+            lines += [f"  - name: {r.choice(APPS)}-{r.choice(TIERS)}-{r.randint(1, 40):02d}",
+                      f"    size: {r.choice(['4vCPU-16GB', '8vCPU-32GB', '16vCPU-64GB'])}",
+                      f"    cluster: {r.choice(SITES)[:3].upper()}-{r.choice(ENVS).upper()}-{r.randint(1, 9)}",
+                      f"    backup: {r.choice(['T1-hourly', 'T2-daily', 'T3-weekly'])}"]  # fmt: skip
+    elif domain == "network":
+        lines.append("firewall_rules:")
+        while sum(map(len, lines)) < CHUNK_CHARS:
+            lines += [f"  - id: FW-{r.randint(1000, 9999)}", f"    action: {r.choice(['permit', 'deny'])}",
+                      f"    port: {r.choice([443, 8443, 5432, 1433, 9092])}", f"    src: {_cidr(r, 24)}",
+                      f"    dst: {_cidr(r, 26)}"]  # fmt: skip
+    else:
+        lines.append("subnets:")
+        while sum(map(len, lines)) < CHUNK_CHARS:
+            lines += [f"  - name: snet-{r.choice(TIERS)}-{r.randint(1, 40):02d}",
+                      f"    cidr: {_cidr(r, r.choice([24, 26]))}", f"    site: {r.choice(SITES)}"]  # fmt: skip
+    return "\n".join(lines)
+
+
+def _chunk(r: random.Random, n: int, domain: str, kind: str, page: int, in_slice: bool) -> dict:
+    content = {"prose": _prose, "table": _table_chunk, "iac": _iac_chunk}[kind]
+    title = r.choice(TOPIC_TITLES.get(domain, ["Certificates"]))
+    return {
+        "id": f"c{n:04d}",
+        "content": content(r, domain) if kind != "prose" else _prose(r, domain),
+        "filename": FILES[domain],
+        "page_number": page,
+        "section_path": f"{domain.capitalize()} > {title}",
+        "chunk_type": kind,
+        "domain": domain,
+        "in_slice": in_slice,
+    }
+
+
+def _key_chunks(r: random.Random, start: int) -> list[dict]:
+    """Facts the planner can only find with ai_search: segments, cluster roles, subscriptions."""
+    names = ["Core-Transit", "DMZ", "Web", "App", "Data", "Mgmt", "Backup", "Monitoring", "Identity",
+             "Cache", "Queue", "Bastion", "Vendor", "Guest"]  # fmt: skip
+    segs = [[100 + 10 * i, n, f"10.{20 + i}.0.0/24", "onprem" if i % 5 else "azure",
+             r.choice(["servers", "network devices", "security tools", "infrastructure services"])]
+            for i, n in enumerate(names)]  # fmt: skip
+    seg_table = _table(["VLAN ID", "Segment name", "CIDR", "Platform", "Purpose"], segs)
+    roles = [["Cluster-MGMT", "Hypervisor management", 100 + 50, r.randint(3, 5)],
+             ["Cluster-VMOTION", "Live migration", 160, r.randint(3, 5)],
+             ["Cluster-STORAGE", "Distributed storage", 170, r.randint(4, 8)],
+             ["Cluster-WORKLOAD", "Production workloads", 120, r.randint(8, 16)]]  # fmt: skip
+    role_table = _table(["Network", "Function", "VLAN ID", "Host count"], roles)
+    subs = _table(["Subscription", "Hosts servers", "Purpose"],
+                  [["Connectivity", "yes", "gateways, firewalls"], ["Identity", "yes", "directory services"],
+                   ["Management", "yes", "monitoring, backup"], ["Data platform", "no", "PaaS only"]])  # fmt: skip
+    items = [("addressing", "IP blocks", seg_table), ("compute", "Cluster roles", role_table),
+             ("cover", "Subscriptions", subs)]  # fmt: skip
+    return [
+        {"id": f"c{start + i:04d}", "content": c, "filename": FILES[d], "page_number": 900 + i,
+         "section_path": f"{d.capitalize()} > {t}", "chunk_type": "table", "domain": d, "in_slice": False}
+        for i, (d, t, c) in enumerate(items)
+    ]  # fmt: skip
+
+
+def generate(slice_chunks: int = 200, extra_chunks: int = 120, seed: int = 42) -> list[dict]:
     r = random.Random(seed)
-    plan: list[str] = []
-    for topic, share in TOPIC_SHARE.items():
-        plan += [topic] * round(pages * share)
-    plan = (plan + ["network"] * pages)[:pages]
-    facts: list[dict] = []
-    docs: list[dict] = []
-    md = ["# Meridian Private Cloud: High-Level Design (SYNTHETIC)\n"]
-    fid = 0
-    for n, topic in enumerate(plan, start=1):
-        section = r.choice(TOPIC_TITLES[topic])
-        page_facts = []
-        for _ in range(FACTS_PER_PAGE):
-            fid += 1
-            f = {
-                "id": f"F{fid:05d}",
-                "page": n,
-                "topic": topic,
-                "section": section,
-                "text": MAKERS[topic](r),
-            }
-            facts.append(f)
-            page_facts.append(f)
-        body = "\n\n".join(f"- ({f['id']}) {f['text']}" for f in page_facts)
-        md.append(f"\n## Page {n}: {section} [{topic}]\n\n{body}\n")
-        docs.append(
-            {
-                "id": f"p{n:04d}",
-                "page": n,
-                "topic": topic,
-                "title": f"{section} (page {n})",
-                "content": " ".join(f["text"] for f in page_facts),
-            }
-        )
-    return facts, docs, "".join(md)
+    chunks: list[dict] = []
+    domains = [d for d, share in DOMAIN_SHARE.items() for _ in range(round(100 * share))]
+    kinds = [k for k, share in TYPE_SHARE.items() for _ in range(round(100 * share))]
+    page = {d: 0 for d in DOMAIN_SHARE}
+    for i in range(slice_chunks + extra_chunks):
+        domain = r.choice(domains)
+        kind = r.choice(kinds)
+        if kind == "iac" and domain in ("cover", "security"):
+            kind = "prose"
+        page[domain] += 1
+        chunks.append(_chunk(r, len(chunks) + 1, domain, kind, page[domain], i < slice_chunks))
+    chunks += _key_chunks(r, len(chunks) + 1)
+    return chunks
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--pages", type=int, default=180)
+    ap.add_argument("--slice", type=int, default=200, dest="slice_chunks")
+    ap.add_argument("--extra", type=int, default=120)
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
-    facts, docs, md = generate(args.pages, args.seed)
+    chunks = generate(args.slice_chunks, args.extra, args.seed)
     OUT.mkdir(parents=True, exist_ok=True)
-    (OUT / "design_document.md").write_text(md)
-    (OUT / "facts.jsonl").write_text("".join(json.dumps(f) + "\n" for f in facts))
-    (OUT / "pages.jsonl").write_text("".join(json.dumps(d) + "\n" for d in docs))
-    chars = sum(len(json.dumps(f)) for f in facts)
-    print(f"{len(docs)} pages, {len(facts)} facts, ~{chars // 4:,} tokens (chars/4) of facts[]")
+    (OUT / "hld.jsonl").write_text("".join(json.dumps(c) + "\n" for c in chunks))
+    s = [c for c in chunks if c["in_slice"]]
+    chars = sum(len(c["content"]) for c in s)
+    print(
+        f"{len(chunks)} chunks ({len(s)} in the facts slice, ~{chars:,} chars, ~{chars // 4:,} tokens est.)"
+    )
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ makes the answer (and therefore the call) long. N is calibrated against the real
 """
 
 import json
+import re
 from typing import Any
 
 SYSTEM = (
@@ -25,3 +26,18 @@ def build_prompt(n_facts: int, facts: list[dict[str, Any]]) -> tuple[str, str]:
     picked = facts[:n_facts]
     user = json.dumps({"fact_count": len(picked), "facts": picked})
     return SYSTEM, user
+
+
+def to_items(chunks: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """Split HLD chunks into small items (sentences, table rows, config lines): finer than chunks, so
+    one verdict per item can make an answer as long as needed."""
+    items: list[dict[str, str]] = []
+    for c in chunks:
+        if c["chunk_type"] == "prose":
+            parts = re.split(r"(?<=[.;])\s+", c["content"])
+        else:
+            parts = c["content"].splitlines()
+        for k, text in enumerate(p.strip() for p in parts):
+            if len(text) > 20:
+                items.append({"id": f"{c['id']}.{k}", "text": text})
+    return items

@@ -9,8 +9,8 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 import httpx
-from fastapi import Body, Depends, FastAPI, Header, HTTPException
-from fastapi.responses import PlainTextResponse
+from fastapi import Body, Depends, FastAPI, Header, HTTPException, Request
+from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel, Field
 
 app = FastAPI(title="apim-timeout-lab api")
@@ -24,6 +24,7 @@ class MemoryStore:
         self.runs: dict[str, dict[str, Any]] = {}
         self.calls: dict[str, list[dict[str, Any]]] = {}
         self.outputs: dict[str, dict[str, Any]] = {}
+        self.files: dict[str, dict[str, bytes]] = {}
 
     async def create_run(self, run_id, fields):
         self.runs[run_id] = {"id": run_id, **fields}
@@ -36,6 +37,15 @@ class MemoryStore:
 
     async def put_output(self, run_id, data):
         self.outputs[run_id] = data
+
+    async def put_file(self, run_id, name, data):
+        self.files.setdefault(run_id, {})[name] = data
+
+    async def list_files(self, run_id):
+        return {n: len(b) for n, b in self.files.get(run_id, {}).items()}
+
+    async def get_file(self, run_id, name):
+        return self.files.get(run_id, {}).get(name)
 
     async def get_run(self, run_id):
         return self.runs.get(run_id)
@@ -232,3 +242,33 @@ async def internal_output(
 ) -> dict:
     await store.put_output(run_id, data)
     return {"ok": True}
+
+
+MEDIA_TYPES = {
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "mmd": "text/plain; charset=utf-8",
+}
+
+
+@app.put("/internal/runs/{run_id}/files/{name}", dependencies=[Depends(require_internal)])
+async def internal_file(run_id: str, name: str, request: Request, store=Depends(get_store)) -> dict:
+    await store.put_file(run_id, name, await request.body())
+    return {"ok": True}
+
+
+@app.get("/runs/{run_id}/files")
+async def list_files(run_id: str, store=Depends(get_store)) -> dict[str, int]:
+    return await store.list_files(run_id)
+
+
+@app.get("/runs/{run_id}/files/{name}")
+async def get_file(run_id: str, name: str, store=Depends(get_store)) -> Response:
+    data = await store.get_file(run_id, name)
+    if data is None:
+        raise HTTPException(404, "file not found")
+    return Response(
+        data,
+        media_type=MEDIA_TYPES.get(name.rsplit(".", 1)[-1], "application/octet-stream"),
+        headers={"Content-Disposition": f'attachment; filename="{name}"'},
+    )

@@ -13,6 +13,7 @@ import argparse
 import asyncio
 import json
 import sys
+import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -20,8 +21,8 @@ from typing import Any
 
 from worker.config import PATHS, Settings
 from worker.llm_client import CallResult, Model
-from worker.orchestrator import load_facts
-from worker.prompts import TARGETS_S, build_prompt
+from worker.orchestrator import load_chunks
+from worker.prompts import TARGETS_S, build_prompt, to_items
 from worker.results import append_csv, results_dir
 
 
@@ -106,12 +107,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--reasoning", default="high")
     ap.add_argument("--skip-calibration", action="store_true", help="use results/calibration.json")
     ap.add_argument("--calibrate-only", action="store_true")
+    ap.add_argument(
+        "--cooldown-s", type=float, default=65.0,
+        help="min seconds between the starts of two calls, so one call's tokens cannot trip the next call's rate limit",
+    )  # fmt: skip
     return ap.parse_args(argv)
 
 
 async def amain(args: argparse.Namespace) -> int:
     st = Settings()
-    facts = load_facts(st.facts_path)
+    facts = to_items(load_chunks(st.facts_path))
     prompts = [p for p in args.prompts.split(",") if p]
     paths = [p for p in args.paths.split(",") if p]
     streams = [s == "on" for s in args.streams.split(",") if s]
@@ -120,7 +125,7 @@ async def amain(args: argparse.Namespace) -> int:
     print(
         f"PLAN {len(cells)} matrix cell(s) + up to {calls_planned - len(cells)} calibration call(s); "
         f"worst case {calls_planned * args.max_output_tokens:,} output tokens "
-        f"(cap {args.max_output_tokens:,}/call); {len(facts)} synthetic facts available; "
+        f"(cap {args.max_output_tokens:,}/call); {len(facts)} synthetic items available; "
         f"foundry={'set' if st.foundry_endpoint else 'MISSING'} apim={'set' if st.apim_url and st.apim_key else 'MISSING'}",
         flush=True,
     )
@@ -136,6 +141,15 @@ async def amain(args: argparse.Namespace) -> int:
         print("CALL " + json.dumps({k: v for k, v in rec.items() if v is not None}), flush=True)
 
     models: dict[str, Model] = {}
+    last_start = 0.0
+
+    async def spacing() -> None:
+        nonlocal last_start
+        wait = last_start + args.cooldown_s - time.monotonic()
+        if last_start and wait > 0:
+            print(f"COOLDOWN {wait:.0f}s", flush=True)
+            await asyncio.sleep(wait)
+        last_start = time.monotonic()
 
     def model_for(path: str) -> Model:
         if path not in models:
@@ -148,6 +162,7 @@ async def amain(args: argparse.Namespace) -> int:
             for name in prompts:
 
                 async def call(n: int, name: str = name) -> CallResult:
+                    await spacing()
                     system, user = build_prompt(n, facts)
                     return await model_for("direct").call(
                         user,
@@ -186,6 +201,7 @@ async def amain(args: argparse.Namespace) -> int:
         for prompt_name, path, stream, rep in cells:
             system, user = build_prompt(calibration[prompt_name]["n_facts"], facts)
             label = f"{path}|stream={'on' if stream else 'off'}|{prompt_name}|r{rep}"
+            await spacing()
             print(f"CELL start {label}", flush=True)
             res = await model_for(path).call(
                 user,

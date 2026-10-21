@@ -17,10 +17,12 @@ from worker.llm_client import Model
 from worker.orchestrator import execute
 from worker.search_tool import DocSearch
 from worker.store import make_store, now_utc
+from worker.tracing import flush_tracing, run_span, setup_tracing
 
 
 async def pipeline() -> int:
     st = Settings()
+    setup_tracing("lab-worker")
     credential = None
     if st.search_endpoint:
         from azure.identity.aio import DefaultAzureCredential
@@ -51,7 +53,8 @@ async def pipeline() -> int:
             return Model(st, cfg.path, recorder, run_id=run_id)
 
         try:
-            summary = await execute(run_id, st, cfg, store, make_model, search)
+            with run_span("lab.pipeline", run_id=run_id, path=cfg.path, stream=cfg.stream):
+                summary = await execute(run_id, st, cfg, store, make_model, search)
         finally:
             if search:
                 await search.aclose()
@@ -64,6 +67,7 @@ async def pipeline() -> int:
         await store.close()
         if credential:
             await credential.close()
+        flush_tracing()
 
 
 def matrix_argv(tokens: list[str]) -> list[str]:
@@ -81,5 +85,8 @@ if __name__ == "__main__":
     if sys.argv[1:2] == ["matrix"]:
         from worker.run_matrix import amain, parse_args
 
-        sys.exit(asyncio.run(amain(parse_args(matrix_argv(sys.argv[2:])))))
+        setup_tracing("lab-matrix")
+        code = asyncio.run(amain(parse_args(matrix_argv(sys.argv[2:]))))
+        flush_tracing()
+        sys.exit(code)
     sys.exit(asyncio.run(pipeline()))

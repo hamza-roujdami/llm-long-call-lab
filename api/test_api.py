@@ -84,3 +84,16 @@ def test_internal_callbacks_require_token_and_feed_polling(client):
     assert got["status"] == "running" and got["phase"] == "p"
     assert got["live_summary"]["max_longest_gap_s"] == 40.0 and len(got["calls"]) == 1
     assert client("GET", f"/runs/{run_id}/output").json() == {"rounds": []}
+
+
+def test_artifacts_roundtrip_and_download(client):
+    run_id = client("POST", "/runs", json={}).json()["run_id"]
+    h = {"x-internal-token": "tok"}
+    url = f"/internal/runs/{run_id}/files/a.xlsx"
+    assert client("PUT", url, content=b"PK-bytes").status_code == 401
+    assert client("PUT", url, content=b"PK-bytes", headers=h).status_code == 200
+    assert client("GET", f"/runs/{run_id}/files").json() == {"a.xlsx": 8}
+    r = client("GET", f"/runs/{run_id}/files/a.xlsx")
+    assert r.content == b"PK-bytes" and "spreadsheetml" in r.headers["content-type"]
+    assert 'filename="a.xlsx"' in r.headers["content-disposition"]
+    assert client("GET", f"/runs/{run_id}/files/missing.docx").status_code == 404

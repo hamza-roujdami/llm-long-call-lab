@@ -1,6 +1,8 @@
 """Orchestrator as a Microsoft Agent Framework workflow:
 
-    planner --fan-out--> cover | network | addressing | compute --fan-in--> assemble
+    planner (+ ai_search) --fan-out--> cover | network | addressing | compute --fan-in--> assemble
+
+The planner derives the section list; a content agent only runs when it was assigned sections.
 
 Each executor wraps a MAF `Agent`; the model client under it is timed at the HTTP level (llm_client.py),
 so every model call and every ai_search call becomes one record. One workflow run = one round.
@@ -15,31 +17,50 @@ from typing import Any, Never
 from agent_framework import Executor, WorkflowBuilder, WorkflowContext, handler
 
 from worker.agents import (
+    CONTENT_INSTRUCTIONS,
+    DOMAIN_OWNER,
     PLANNER_EXHAUSTIVE,
     PLANNER_NORMAL,
-    SECTION_INSTRUCTIONS,
+    SHEET_TYPES,
     build_agent,
     run_agent,
+    with_retries,
 )
 from worker.config import RunConfig, Settings
 from worker.llm_client import Model, Recorder, call_context
+from worker.outputs import build_artifacts
 from worker.search_tool import SearchFn, make_search_tool
 from worker.store import Store, now_utc
 
+ENGAGEMENT_ID = "ENG-001"
+SCOPE_INVENTORY = {
+    "stacks": [
+        {"stack": "Compute and Storage", "solutions": ["Virtualisation", "Backup"]},
+        {"stack": "Network", "solutions": ["Core routing", "Firewalling", "Load balancing"]},
+    ],
+    "subnets": ["snet-app-01", "snet-data-01", "snet-mgmt-01", "snet-dmz-01"],
+}
 
-def load_facts(path: str) -> list[dict[str, Any]]:
+
+def load_chunks(path: str) -> list[dict[str, Any]]:
     with open(path) as f:
         return [json.loads(line) for line in f if line.strip()]
 
 
-def select_by_tokens(facts: list[dict[str, Any]], budget_tokens: int) -> list[dict[str, Any]]:
-    """Take facts in order until the rough token budget (chars/4) is used."""
+def to_fact(chunk: dict[str, Any]) -> dict[str, Any]:
+    """A chunk as it appears in an envelope's facts[]."""
+    keys = ("id", "content", "filename", "page_number", "section_path", "chunk_type")
+    return {k: chunk[k] for k in keys}
+
+
+def select_by_tokens(chunks: list[dict[str, Any]], budget_tokens: int) -> list[dict[str, Any]]:
+    """Take chunks in order until the rough token budget (chars/4 of the JSON) is used."""
     out, used = [], 0
-    for f in facts:
-        cost = len(json.dumps(f)) // 4 + 1
+    for c in chunks:
+        cost = len(json.dumps(to_fact(c))) // 4 + 1
         if used + cost > budget_tokens:
             break
-        out.append(f)
+        out.append(c)
         used += cost
     return out
 
@@ -86,16 +107,34 @@ class SectionDone:
 class Deps:
     run_id: str
     cfg: RunConfig
-    facts: list[dict[str, Any]]
+    chunks: list[dict[str, Any]]
     client: Any  # MAF chat client over the timed HTTP client
     search: SearchFn | None
     record: Recorder
     store: Store
     total_agents: int
+    attempts: int = 1
+    backoff_s: float = 5.0
     done: int = 0
     plan: dict[str, Any] = field(
         default_factory=dict
     )  # latest planner output, for the round result
+
+    async def run(self, agent_name: str, round_no: int, make_run) -> dict[str, Any]:
+        """Run one agent with the pipeline's retry policy; every retry is recorded."""
+
+        async def note(attempt: int, err: Exception) -> None:
+            await self.record(
+                {
+                    "kind": "agent_retry", "run_id": self.run_id, "round": round_no, "agent": agent_name,
+                    "attempt": attempt, "outcome": "retrying", "error_type": type(err).__name__,
+                    "error_detail": str(err)[:300],
+                }
+            )  # fmt: skip
+
+        return await with_retries(
+            make_run, attempts=self.attempts, backoff_s=self.backoff_s, on_retry=note
+        )
 
     async def progress(self, phase: str) -> None:
         await self.store.update_run(
@@ -112,8 +151,17 @@ class PlannerExecutor(Executor):
     async def run(self, msg: RoundStart, ctx: WorkflowContext[PlanDone]) -> None:
         d, cfg = self.d, self.d.cfg
         await d.progress(f"round {msg.round_no}: planner")
-        facts = select_by_tokens(d.facts, cfg.fact_tokens)
+        facts = [
+            to_fact(c)
+            for c in select_by_tokens([c for c in d.chunks if c["in_slice"]], cfg.fact_tokens)
+        ]
         instructions = PLANNER_EXHAUSTIVE if cfg.depth == "exhaustive" else PLANNER_NORMAL
+        envelope = {
+            "engagement_id": ENGAGEMENT_ID,
+            "scope_inventory": SCOPE_INVENTORY,
+            "fact_count": len(facts),
+            "facts": facts,
+        }
         with call_context(
             run_id=d.run_id,
             agent="planner",
@@ -121,22 +169,41 @@ class PlannerExecutor(Executor):
             path=cfg.path,
             stream=cfg.stream,
         ):
+            tools = [make_search_tool(d.search, d.record, cfg.max_tool_calls)] if d.search else None
             agent = build_agent(
                 d.client,
                 "planner",
                 instructions,
+                tools=tools,
                 reasoning_effort=cfg.reasoning_effort,
                 max_output_tokens=cfg.max_output_tokens,
             )
-            payload = json.dumps({"fact_count": len(facts), "facts": facts})
-            plan = await run_agent(agent, payload, stream=cfg.stream)
+            plan = await d.run(
+                "planner",
+                msg.round_no,
+                lambda: run_agent(agent, json.dumps(envelope), stream=cfg.stream),
+            )
         d.done += 1
         d.plan = plan
-        await d.progress(f"round {msg.round_no}: sections")
+        await d.progress(f"round {msg.round_no}: content agents")
         await ctx.send_message(PlanDone(msg.round_no, plan))
 
 
-class SectionExecutor(Executor):
+def assigned_sections(plan: dict[str, Any], topic: str) -> list[dict[str, Any]]:
+    """Sections the planner gave to this agent (owner_agent wins; sheet_type is the fallback)."""
+    out = []
+    for s in plan.get("sections") or []:
+        if not isinstance(s, dict):
+            continue
+        owner = s.get("owner_agent") or SHEET_TYPES.get(str(s.get("sheet_type")))
+        if owner == topic:
+            out.append(s)
+    return out
+
+
+class ContentExecutor(Executor):
+    """One content agent. It only calls the model when the planner assigned it sections."""
+
     def __init__(self, d: Deps, topic: str) -> None:
         super().__init__(id=topic)
         self.d, self.topic = d, topic
@@ -144,11 +211,16 @@ class SectionExecutor(Executor):
     @handler
     async def run(self, msg: PlanDone, ctx: WorkflowContext[SectionDone]) -> None:
         d, cfg, topic = self.d, self.d.cfg, self.topic
-        facts = select_by_tokens(
-            [f for f in d.facts if f["topic"] == topic], cfg.section_fact_tokens
-        )
-        mine = [s for s in msg.plan.get("sections", []) if s.get("agent") == topic]
-        payload = json.dumps({"plan": mine, "facts": facts})
+        mine = assigned_sections(msg.plan, topic)
+        if not mine:
+            d.done += 1
+            await ctx.send_message(
+                SectionDone(topic, {"sheets": [], "issues": ["no sections assigned"]})
+            )
+            return
+        chunks = [c for c in d.chunks if c["in_slice"] and DOMAIN_OWNER.get(c["domain"]) == topic]
+        facts = [to_fact(c) for c in select_by_tokens(chunks, cfg.section_fact_tokens)]
+        payload = json.dumps({"engagement_id": ENGAGEMENT_ID, "sections": mine, "facts": facts})
         with call_context(
             run_id=d.run_id, agent=topic, round_no=msg.round_no, path=cfg.path, stream=cfg.stream
         ):
@@ -156,12 +228,14 @@ class SectionExecutor(Executor):
             agent = build_agent(
                 d.client,
                 topic,
-                SECTION_INSTRUCTIONS[topic],
+                CONTENT_INSTRUCTIONS[topic],
                 tools=tools,
                 reasoning_effort=cfg.reasoning_effort,
                 max_output_tokens=cfg.max_output_tokens,
             )
-            output = await run_agent(agent, payload, stream=cfg.stream)
+            output = await d.run(
+                topic, msg.round_no, lambda: run_agent(agent, payload, stream=cfg.stream)
+            )
         d.done += 1
         await ctx.send_message(SectionDone(topic, output))
 
@@ -182,7 +256,7 @@ class AssembleExecutor(Executor):
 
 def build_workflow(d: Deps):
     planner = PlannerExecutor(d)
-    sections = [SectionExecutor(d, t) for t in d.cfg.agents if t in SECTION_INSTRUCTIONS]
+    sections = [ContentExecutor(d, t) for t in d.cfg.agents if t in CONTENT_INSTRUCTIONS]
     assemble = AssembleExecutor(d)
     return (
         WorkflowBuilder(start_executor=planner, output_from=[assemble])
@@ -211,16 +285,18 @@ async def execute(
         print("CALL " + json.dumps({k: v for k, v in rec.items() if v is not None}), flush=True)
 
     model = make_model(record)
-    n_sections = len([t for t in cfg.agents if t in SECTION_INSTRUCTIONS])
+    n_sections = len([t for t in cfg.agents if t in CONTENT_INSTRUCTIONS])
     d = Deps(
         run_id=run_id,
         cfg=cfg,
-        facts=load_facts(st.facts_path),
+        chunks=load_chunks(st.facts_path),
         client=model.agent_client(),
         search=search,
         record=record,
         store=store,
         total_agents=(1 + n_sections) * cfg.rounds,
+        attempts=st.llm_max_attempts,
+        backoff_s=st.llm_retry_backoff_s,
     )
     t0 = time.monotonic()
     await store.update_run(run_id, status="running", started_utc=now_utc(), phase="starting")
@@ -234,6 +310,9 @@ async def execute(
         await store.put_output(
             run_id, {"run_id": run_id, "config": cfg.model_dump(), "rounds": outputs}
         )
+        last = outputs[-1]
+        for name, data in build_artifacts(last["plan"], last["sections"]).items():
+            await store.put_file(run_id, name, data)
         await store.update_run(
             run_id,
             status="succeeded",
