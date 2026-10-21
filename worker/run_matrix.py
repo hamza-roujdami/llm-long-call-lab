@@ -22,7 +22,14 @@ from typing import Any
 from worker.config import PATHS, Settings
 from worker.llm_client import CallResult, Model
 from worker.orchestrator import load_chunks
-from worker.prompts import TARGETS_S, build_prompt, to_items
+from worker.prompts import (
+    BASE_WORDS,
+    DEFAULT_ITEMS,
+    PROMPT_REASONING,
+    TARGETS_S,
+    build_prompt,
+    to_items,
+)
 from worker.results import append_csv, results_dir
 
 
@@ -48,9 +55,14 @@ async def calibrate(
     cap: int,
     start: int = START_FACTS,
     tol: float = TOLERANCE,
-    max_iter: int = 4,
+    max_iter: int = 6,
+    max_step: float = 2.0,
 ) -> dict[str, Any]:
-    """Scale the number of facts until one streamed call takes about target_s seconds."""
+    """Scale the number of facts until one streamed call takes about target_s seconds.
+
+    Each step is clamped to [1/max_step, max_step] x the previous size: the model does not scale linearly (a
+    big list can make it answer shortly), so big jumps overshoot or get rejected by the token quota.
+    """
     history: list[dict[str, Any]] = []
     n = start
     for _ in range(max_iter):
@@ -78,12 +90,32 @@ async def calibrate(
         n_next = int(n * (target_s - lead) / max(d - lead, 1.0))
         if n >= n_max and n_next > n_max:
             return {**base, "status": "failed", "reason": f"needs more than {n_max} facts"}
-        n = n_next
+        n = max(int(n / max_step), min(n_next, int(n * max_step)))
     return {
         **base,
         "status": "failed",
         "reason": f"not within {int(tol * 100)}% after {max_iter} tries",
     }
+
+
+SHORT_S = 240  # a call that ends before this tests nothing about the 230-240 s / 4-minute limits
+
+
+def verdict(rec: dict[str, Any]) -> str:
+    total = rec.get("total_s") or 0
+    if rec.get("outcome") == "completed" and total < SHORT_S:
+        return f"completed in {total:.0f}s: TOO SHORT to test the limits"
+    return f"{rec.get('outcome')} http={rec.get('http_status')} {rec.get('error_type') or ''} total={total:.0f}s".strip()
+
+
+def fit_items(items: list[dict[str, str]], max_tokens: int) -> int:
+    """How many items fit in max_tokens (chars/3.5 estimate of the prompt JSON)."""
+    used = 0
+    for i, it in enumerate(items):
+        used += (len(it["id"]) + len(it["text"]) + 20) / 3.5
+        if used > max_tokens:
+            return i
+    return len(items)
 
 
 def plan_cells(prompts: list[str], paths: list[str], streams: list[bool], repeat: int):
@@ -107,6 +139,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--reasoning", default="high")
     ap.add_argument("--skip-calibration", action="store_true", help="use results/calibration.json")
     ap.add_argument("--calibrate-only", action="store_true")
+    ap.add_argument(
+        "--known", default="",
+        help="reuse a calibration, e.g. S=485: skip calibrating that prompt (its measured time is not re-checked)",
+    )  # fmt: skip
+    ap.add_argument(
+        "--max-input-tokens", type=int, default=90_000,
+        help="largest prompt calibration may build (estimated), kept under the tokens/min quota",
+    )  # fmt: skip
     ap.add_argument(
         "--cooldown-s", type=float, default=65.0,
         help="min seconds between the starts of two calls, so one call's tokens cannot trip the next call's rate limit",
@@ -158,31 +198,49 @@ async def amain(args: argparse.Namespace) -> int:
 
     try:
         calibration = {} if not args.skip_calibration else load_calibration()
+        known = {k: int(v) for k, _, v in (x.partition("=") for x in args.known.split(",") if x)}
+        for name, knob in known.items():  # S: items, L: words per note
+            n = knob if name == "S" else calibration.get("S", {}).get("n_facts", DEFAULT_ITEMS)
+            calibration[name] = {
+                "n_facts": n,
+                "words": BASE_WORDS if name == "S" else knob,
+                "measured_s": None,
+                "target_s": TARGETS_S[name],
+                "reused": True,
+            }
         if not args.skip_calibration:
-            for name in prompts:
+            for name in [p for p in prompts if p not in known]:
+                s_items = calibration.get("S", {}).get("n_facts", DEFAULT_ITEMS)
 
-                async def call(n: int, name: str = name) -> CallResult:
+                async def call(knob: int, name: str = name, s_items: int = s_items) -> CallResult:
                     await spacing()
-                    system, user = build_prompt(n, facts)
+                    n, words = (knob, BASE_WORDS) if name == "S" else (s_items, knob)
+                    system, user = build_prompt(n, facts, words)
                     return await model_for("direct").call(
                         user,
                         system=system,
                         stream=True,
                         reasoning_effort=args.reasoning,
                         max_output_tokens=args.max_output_tokens,
-                        label=f"calibrate-{name}-n{n}",
+                        label=f"calibrate-{name}-{'n' if name == 'S' else 'w'}{knob}",
                         agent="calibration",
                     )
 
                 result = await calibrate(
-                    name, TARGETS_S[name], call, n_max=len(facts), cap=args.max_output_tokens
+                    name,
+                    TARGETS_S[name],
+                    call,
+                    n_max=fit_items(facts, args.max_input_tokens) if name == "S" else 200,
+                    cap=args.max_output_tokens,
+                    start=START_FACTS if name == "S" else 45,
                 )
                 print("CALIBRATION " + json.dumps(result), flush=True)
                 if result["status"] != "ok":
                     print(f"STOP: calibration of {name} failed: {result['reason']}", flush=True)
                     return 2
                 calibration[name] = {
-                    "n_facts": result["n_facts"],
+                    "n_facts": result["n_facts"] if name == "S" else s_items,
+                    "words": BASE_WORDS if name == "S" else result["n_facts"],
                     "measured_s": result["measured_s"],
                     "target_s": result["target_s"],
                 }
@@ -198,8 +256,13 @@ async def amain(args: argparse.Namespace) -> int:
         if args.calibrate_only:
             return 0
 
+        outcomes: list[str] = []
         for prompt_name, path, stream, rep in cells:
-            system, user = build_prompt(calibration[prompt_name]["n_facts"], facts)
+            system, user = build_prompt(
+                calibration[prompt_name]["n_facts"],
+                facts,
+                calibration[prompt_name].get("words", BASE_WORDS),
+            )
             label = f"{path}|stream={'on' if stream else 'off'}|{prompt_name}|r{rep}"
             await spacing()
             print(f"CELL start {label}", flush=True)
@@ -207,7 +270,7 @@ async def amain(args: argparse.Namespace) -> int:
                 user,
                 system=system,
                 stream=stream,
-                reasoning_effort=args.reasoning,
+                reasoning_effort=PROMPT_REASONING.get(prompt_name) or args.reasoning,
                 max_output_tokens=args.max_output_tokens,
                 label=label,
                 agent="matrix",
@@ -219,6 +282,8 @@ async def amain(args: argparse.Namespace) -> int:
                 f"total={r.get('total_s')} {res.error}",
                 flush=True,
             )
+            outcomes.append(f"{label}: {verdict(r)}")
+        print("MATRIX " + json.dumps(outcomes), flush=True)
         return 0
     finally:
         for m in models.values():

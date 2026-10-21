@@ -123,3 +123,63 @@ def test_cooldown_spaces_consecutive_calls(live_fake, monkeypatch, tmp_path):
     t0 = time.monotonic()
     assert run(run_matrix.amain(args)) == 0
     assert time.monotonic() - t0 >= 1.4  # the second cell waited for the cooldown
+
+
+def test_calibration_steps_are_clamped_and_converge():
+    sizes = []
+
+    async def call(n: int) -> CallResult:
+        sizes.append(n)
+        return await fake_call(lambda m: 2 + 0.25 * m)(n)
+
+    res = run(run_matrix.calibrate("S", 300, call, n_max=5000, cap=10**9, start=100))
+    assert res["status"] == "ok"
+    assert all(
+        b <= 2 * a for a, b in zip(sizes, sizes[1:], strict=False)
+    )  # never more than 2x per step
+
+
+def test_fit_items_respects_the_input_token_budget():
+    items = [{"id": f"c{i}.0", "text": "x" * 100} for i in range(1000)]
+    n = run_matrix.fit_items(items, 5000)
+    assert 0 < n < 1000 and run_matrix.fit_items(items, 10**9) == 1000
+
+
+def test_known_calibration_is_reused_without_calling_the_model(live_fake, monkeypatch, tmp_path):
+    monkeypatch.setenv("LLM_BASE_URL_OVERRIDE", live_fake)
+    monkeypatch.setenv("RESULTS_DIR", str(tmp_path))
+    args = run_matrix.parse_args(
+        ["--max-output-tokens", "100", "--confirm-spend", "--known", "S=3", "--prompts", "S",
+         "--paths", "direct", "--streams", "off", "--cooldown-s", "0"]
+    )  # fmt: skip
+    assert run(run_matrix.amain(args)) == 0
+    rows = (tmp_path / "runs.csv").read_text().splitlines()
+    assert len(rows) == 2 and "calibrate" not in rows[1] and "direct|stream=off|S|r1" in rows[1]
+
+
+def test_L_keeps_the_items_and_calibrates_the_words(live_fake, monkeypatch, tmp_path):
+    from worker.prompts import build_prompt, system_prompt
+
+    assert "40 to 50 words" in system_prompt(45) and "25 to 35 words" in system_prompt()
+    system, user = build_prompt(3, [{"id": "a", "text": "t"}] * 5, 60)
+    assert "55 to 65 words" in system and '"fact_count": 3' in user
+
+    monkeypatch.setenv("LLM_BASE_URL_OVERRIDE", live_fake)
+    monkeypatch.setenv("RESULTS_DIR", str(tmp_path))
+    args = run_matrix.parse_args(
+        ["--max-output-tokens", "100", "--confirm-spend", "--known", "S=4,L=60", "--prompts", "S,L",
+         "--paths", "direct", "--streams", "off", "--cooldown-s", "0"]
+    )  # fmt: skip
+    assert run(run_matrix.amain(args)) == 0
+    assert (
+        len((tmp_path / "runs.csv").read_text().splitlines()) == 1 + 2
+    )  # S and L cells, no calibration
+
+
+def test_verdict_flags_calls_too_short_to_test_the_limits():
+    assert "TOO SHORT" in run_matrix.verdict({"outcome": "completed", "total_s": 100})
+    assert "TOO SHORT" not in run_matrix.verdict({"outcome": "completed", "total_s": 300})
+    cut = run_matrix.verdict(
+        {"outcome": "truncated", "http_status": 200, "error_type": "X", "total_s": 100}
+    )
+    assert "truncated" in cut and "TOO SHORT" not in cut  # a cut is data at any duration

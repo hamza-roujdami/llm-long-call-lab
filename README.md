@@ -108,17 +108,26 @@ The web UI starts a run, the API starts the worker Job, the UI polls. Streaming 
 
 ## Results
 
-**The real matrix has not been run yet** (cost guard, see below). Only tiny capped smoke runs exist (`results/smoke.csv`,
-GPT-6 Sol, reasoning low, ~40 s): the pipeline works on paths 1 and 3. They say nothing about timeouts.
+**Observed (our runs, real GPT-6 Sol, Sweden Central, APIM Developer; data in [results/runs.csv](results/runs.csv)).** 1 run per cell (2 for the L reruns).
 
-| # | Path | Stream | Expected | Observed S | Observed L |
+| # | Path | Stream | Expected | Observed S (~180-270 s) | Observed L (~210-285 s) |
 |---|---|---|---|---|---|
-| 1 | direct | off | May be dropped when silent ≥ 4 min (outbound idle timeout) | _not run_ | _not run_ |
-| 2 | direct | on | Passes while tokens flow; a long silent start may be dropped | _not run_ | _not run_ |
-| 3 | apim-default | off | Cut near 230-240 s (H1) | _not run_ | _not run_ |
-| 4 | apim-default | on | Buffered by default; likely cut or delayed | _not run_ | _not run_ |
-| 5 | apim-stream | off | Silent > 4 min: likely cut | _not run_ | _not run_ |
-| 6 | apim-stream | on | Passes while tokens flow (H2); a ≥ 4 min silent start may be cut (H3) | _not run_ | _not run_ |
+| 1 | direct | off | May be dropped when silent ≥ 4 min | ok, 188 s | **cut twice at 240.7 s and 241.4 s** (`ReadError`, no HTTP status); ok at 102 s in an earlier shorter run |
+| 2 | direct | on | Passes while tokens flow | ok, 268 s | ok, 230 / 284 / 270 s |
+| 3 | apim-default | off | Cut near 230-240 s (H1) | ok, 190 s | **HTTP 500 at 230.1 s** once (APIM log: `BackendConnectionFailure`, "Underlying transport connection was unexpectedly closed"); then ok at 229 s and 221 s |
+| 4 | apim-default | on | Buffered by default; may be cut or delayed | ok, 220 s | ok, 240 / 222 s |
+| 5 | apim-stream | off | Silent > 4 min: likely cut | ok, 177 s | ok, 229 / 224 s |
+| 6 | apim-stream | on | Passes while tokens flow (H2) | ok, 238 s | ok, 211 / 226 s |
+
+**What this does and does not show**
+- **Observed:** a non-streaming call that stays silent past ~240 s was cut on the direct path (2 of 2), and one APIM-default call was cut at 230.1 s. This supports H1 and says H4 is not safe to assume.
+  The direct cut happens at the same ~4-minute mark as Learn's idle timeout (see the links below), but the cut point alone does not tell us which hop closed the connection.
+- **Observed:** streaming calls that kept producing tokens survived up to 284 s on the direct path.
+- **Not shown:** every non-streaming call that finished below ~230 s passed on every path, so most cells sit just under the limit and prove little. No APIM call exceeded ~240 s, so
+  **H2 (streaming + `buffer-response=false`) and H3 (4+ min silent before the first token) are not tested at APIM**. Before the first token the model was silent for only 35-76 s at its longest in these runs.
+- **Why the calls are short:** GPT-6 Sol stops writing at about 35-40K output tokens (~230-290 s) whatever the prompt asks for, and a larger input makes it answer shorter. We could not reach the 450 s target
+  with output length alone; L adds silent reasoning (`xhigh`), which moved the first token to ~40-75 s. A call that is silent for 4+ minutes before its first token needs a harder reasoning task and is the next thing to try.
+- The pipeline's 8-minute demo run is many calls of 3-120 s each; it is not evidence about long single calls.
 
 Expected, from Learn: `forward-request` `timeout` is the wait for response **headers** and values above 240 s may not be honoured;
 `buffer-response="false"` relays chunks immediately ([forward-request](https://learn.microsoft.com/azure/api-management/forward-request-policy)).
@@ -126,7 +135,7 @@ Connections idle 4 minutes or more need a keep-alive because of the Azure Load B
 Outbound flows default to a 4-minute idle timeout and are dropped silently unless TCP reset is enabled ([outbound rules](https://learn.microsoft.com/azure/load-balancer/outbound-rules#outbound-flow-idle-timeout-and-tcp-reset)); whether that applies to Job egress is H4.
 
 **How to read it**
-- Path 2 cuts at ~230-240 s and path 3 passes: configuration was the problem.
+- Path 2 cuts at ~230-240 s and path 3 passes: configuration was the problem. (Not yet shown: our one APIM-default cut was not repeated, and path 3 had no call above ~240 s.)
 - Path 3 streaming still cuts after a long silent stretch: the 4-minute idle limit applies. Options: async (202 + polling), lower reasoning effort, or bypass the gateway for those calls.
 - Everything passes: the difference lies elsewhere (prompt size, retries, concurrency).
 
