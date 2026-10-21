@@ -20,6 +20,7 @@ param apimName string
 param apimUrl string
 param llmMaxAttempts int = 1
 param llmRetryBackoffSeconds int = 5
+param llmTpmBudget int = 0
 
 param envDefaultDomain string
 
@@ -28,6 +29,9 @@ param labPassword string
 
 @secure()
 param internalToken string
+
+@secure()
+param appInsightsConnectionString string
 
 var searchEndpoint = 'https://${searchName}.search.windows.net'
 var foundryEndpoint = 'https://${foundryName}.openai.azure.com'
@@ -79,8 +83,10 @@ var workerEnv = [
   { name: 'APIM_KEY', secretRef: 'apim-key' }
   { name: 'SEARCH_ENDPOINT', value: searchEndpoint }
   { name: 'MODEL', value: modelName }
+  { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', secretRef: 'appinsights-cs' }
   { name: 'LLM_MAX_ATTEMPTS', value: string(llmMaxAttempts) }
   { name: 'LLM_RETRY_BACKOFF_S', value: string(llmRetryBackoffSeconds) }
+  { name: 'LLM_TPM_BUDGET', value: string(llmTpmBudget) }
 ]
 
 var registries = [{ server: registryServer, identity: identityId }]
@@ -104,6 +110,7 @@ resource worker 'Microsoft.App/jobs@2024-03-01' = {
       secrets: [
         { name: 'apim-key', value: apimKey }
         { name: 'internal-token', value: internalToken }
+        { name: 'appinsights-cs', value: appInsightsConnectionString }
       ]
     }
     template: {

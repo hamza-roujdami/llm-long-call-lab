@@ -39,6 +39,9 @@ param searchLocation string = location
 param llmMaxAttempts int = 1
 param llmRetryBackoffSeconds int = 5
 
+@description('Pace pipeline requests to this tokens/minute (0 = off). Set a bit below the model deployment quota.')
+param llmTpmBudget int = 0
+
 @secure()
 param labPassword string
 
@@ -110,6 +113,18 @@ resource foundry 'Microsoft.CognitiveServices/accounts@2025-06-01' = {
     customSubDomainName: foundryName
     publicNetworkAccess: 'Enabled'
     disableLocalAuth: true
+    allowProjectManagement: true
+  }
+}
+
+resource project 'Microsoft.CognitiveServices/accounts/projects@2025-06-01' = {
+  parent: foundry
+  name: 'lab'
+  location: location
+  identity: { type: 'SystemAssigned' }
+  properties: {
+    displayName: 'apim-timeout-lab'
+    description: 'Long-call lab: GPT-6 Sol deployment, traces and (later) registered agents'
   }
 }
 
@@ -120,6 +135,7 @@ resource model 'Microsoft.CognitiveServices/accounts/deployments@2025-06-01' = {
   properties: {
     model: { format: 'OpenAI', name: modelName, version: modelVersion }
   }
+  dependsOn: [project]
 }
 
 // ---- Container Apps environment (Consumption)
@@ -134,6 +150,32 @@ resource env 'Microsoft.App/managedEnvironments@2024-03-01' = {
         sharedKey: law.listKeys().primarySharedKey
       }
     }
+  }
+}
+
+// ---- Monitoring and traces: workspace-based Application Insights, connected to the Foundry project so the
+// agents' OpenTelemetry (gen_ai) traces show up in the project's Traces view.
+resource appInsights 'Microsoft.Insights/components@2020-02-02' = {
+  name: '${namePrefix}-ai-${suffix}'
+  location: location
+  kind: 'web'
+  properties: {
+    Application_Type: 'web'
+    WorkspaceResourceId: law.id
+    IngestionMode: 'LogAnalytics'
+  }
+}
+
+resource appInsightsConnection 'Microsoft.CognitiveServices/accounts/projects/connections@2025-06-01' = {
+  parent: project
+  name: 'appinsights'
+  properties: {
+    category: 'AppInsights'
+    target: appInsights.id
+    authType: 'ApiKey'
+    isSharedToAll: true
+    credentials: { key: appInsights.properties.ConnectionString }
+    metadata: { ApiType: 'Azure', ResourceId: appInsights.id }
   }
 }
 
@@ -172,9 +214,11 @@ module apps 'apps.bicep' = if (deployApps) {
     apimUrl: apim.outputs.gatewayUrl
     llmMaxAttempts: llmMaxAttempts
     llmRetryBackoffSeconds: llmRetryBackoffSeconds
+    llmTpmBudget: llmTpmBudget
     labPassword: labPassword
     internalToken: internalToken
     envDefaultDomain: env.properties.defaultDomain
+    appInsightsConnectionString: appInsights.properties.ConnectionString
   }
   dependsOn: [acrPull]
 }
@@ -186,6 +230,9 @@ output logAnalyticsName string = law.name
 output searchName string = search.name
 output searchEndpoint string = 'https://${search.name}.search.windows.net'
 output foundryName string = foundry.name
+output foundryProject string = project.name
+output foundryProjectEndpoint string = 'https://${foundry.name}.services.ai.azure.com/api/projects/${project.name}'
+output appInsightsName string = appInsights.name
 output foundryEndpoint string = 'https://${foundry.name}.openai.azure.com'
 output webUrl string = deployApps ? apps!.outputs.webUrl : ''
 output workerJobName string = deployApps ? apps!.outputs.workerJobName : ''

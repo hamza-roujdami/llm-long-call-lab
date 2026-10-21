@@ -20,4 +20,4 @@ az containerapp job start -n "$JOB" -g "$RG" --subscription "$SUB" --container-n
   --image "$ACR.azurecr.io/worker:$TAG" --args matrix "$@" \
   --env-vars "FOUNDRY_ENDPOINT=$(val foundryEndpoint)" "APIM_URL=$(val apimGatewayUrl)" \
   "APIM_KEY=secretref:apim-key" "MODEL=gpt-6-sol" "AZURE_CLIENT_ID=$IDENTITY_CLIENT_ID" \
-  "LLM_READ_TIMEOUT_S=3600" --query name -o tsv
+  "APPLICATIONINSIGHTS_CONNECTION_STRING=secretref:appinsights-cs" "LLM_READ_TIMEOUT_S=3600" --query name -o tsv
